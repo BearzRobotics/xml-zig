@@ -1,0 +1,8 @@
+.{
+    .name = .xml,
+    .fingerprint = 0x31f4d86333d13eaa,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "src", "bench", "ai", "docs", "LICENSE", "README.md" },
+}
