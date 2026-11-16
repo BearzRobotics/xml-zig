@@ -20,12 +20,15 @@ all of them, as `toml-zig` and `regex-zig` do for their formats.
    documents that fit in memory.
 2. **One byte of lookahead.** The parser never peeks more than one byte, so it
    works with any `std.Io.Reader`, including one with a one-byte buffer.
-3. **No DTD processing.** Declared entities are skipped and a reference to one is an error, external
+3. **No DTD processing.** Declared entities are skipped and a reference to one is an error (unless the caller
+   supplies it in `Options.entities`, which is safe: the caller chooses the text, nothing recurses), external
    subsets are never fetched, and nothing is validated. This removes the whole family of
    entity-expansion ("billion laughs") and external-entity attacks instead of limiting them, and
    it costs the documents that rely on declared entities. Wikipedia dumps, `docx`, `odt`, RSS and Atom do not.
-4. **UTF-8 only.** Every format dksearch reads is UTF-8. UTF-16 and other encodings are refused with a clear
-   error rather than mishandled; adding them would need a transcoding reader in front of the parser.
+4. **UTF-8 inside, UTF-8, UTF-16 and ISO-8859-1 outside.** The parser works on UTF-8 bytes. UTF-16 and
+   ISO-8859-1 documents are converted as they are read (a small decoder behind `peek`/`take`, detected from the
+   byte order mark, the first bytes, or the declaration), so the parser itself does not change. Other
+   encodings are refused with a clear error rather than mishandled.
 5. **Namespaces by default.** Office formats are defined by namespace URIs, not prefixes, so the reader
    resolves them (and `Options.namespaces = false` turns it off).
 

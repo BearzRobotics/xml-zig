@@ -1,6 +1,6 @@
 # xml-zig
 
-XML 1.0 parser and writer for Zig 0.17, with no dependencies. It reads from any `std.Io.Reader` one event at a time and never needs the whole input in memory; a small in-memory tree is built on top for documents that fit (office-document parts, configuration). It writes to any `std.Io.Writer`. See `ai/SPEC.md` for requirements and known deviations (entities are not expanded, only UTF-8 input).
+XML 1.0 parser and writer for Zig 0.17, with no dependencies. It reads from any `std.Io.Reader` one event at a time and never needs the whole input in memory; a small in-memory tree is built on top for documents that fit (office-document parts, configuration). It writes to any `std.Io.Writer`. See `ai/SPEC.md` for requirements and known deviations (DTD entities are not expanded but you can supply your own; UTF-8, UTF-16 and ISO-8859-1 input).
 
 ```zig
 // build.zig.zon: .xml = .{ .path = "../xml-zig" }
@@ -30,4 +30,4 @@ const body = doc.root.childNs(ns, "body");
 - `docs/decisions/` — design decisions.
 - `zig build cli` — builds `zig-out/bin/xml-parse` (`check`, `events`, `text`).
 
-`zig build test` runs the tests. License: MIT.
+`zig build test` runs the tests; `zig build conformance -Dsuite=DIR/xmlconf` runs the W3C conformance suite (`scripts/fetch-conformance.sh` downloads it). License: MIT.

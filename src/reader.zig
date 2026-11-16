@@ -61,7 +61,18 @@ pub const DoctypeMode = enum {
     reject,
 };
 
+/// A named replacement for `&name;`, supplied by the caller (for example
+/// `.{ .name = "nbsp", .value = "\u{a0}" }` for XHTML-style documents). The value is
+/// inserted as plain text, never parsed, so it cannot contain markup or more references.
+pub const Entity = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const Options = struct {
+    /// Entities beyond the five predefined ones that the document may use.
+    /// Declarations in the document's own DTD are never read (see docs/decisions/0001).
+    entities: []const Entity = &.{},
     /// Resolve namespace prefixes (`Name.uri`); an unbound prefix is an error.
     namespaces: bool = true,
     doctype: DoctypeMode = .skip,
@@ -124,6 +135,8 @@ pub const Event = union(enum) {
 
 const State = enum { start, prolog, content, epilog, done };
 
+const Encoding = enum { utf8, utf16le, utf16be, latin1 };
+
 const Span = struct { off: u32, len: u32 };
 
 pub const Reader = struct {
@@ -151,6 +164,16 @@ pub const Reader = struct {
     ns_binds: std.ArrayList(struct { prefix: Span, uri: Span }) = .empty,
     ns_marks: std.ArrayList(u32) = .empty,
 
+    /// How the input's bytes are read: UTF-8 as is, or decoded to UTF-8 on the way in.
+    enc: Encoding = .utf8,
+    /// Bytes of one decoded character waiting to be handed out (non-UTF-8 input).
+    pend: [4]u8 = undefined,
+    pend_len: u8 = 0,
+    pend_pos: u8 = 0,
+    /// Raw bytes read ahead while detecting the encoding, to be read again.
+    push: [2]u8 = undefined,
+    push_len: u8 = 0,
+    had_utf8_bom: bool = false,
     /// An end event owed for an empty element (`<a/>`).
     pending_end: bool = false,
     /// The name of the element that just ended, kept until the next call so the event can borrow it.
@@ -192,7 +215,8 @@ pub const Reader = struct {
 
     // ------------------------------------------------------- byte access
 
-    fn peekByte(self: *Reader) Error!?u8 {
+    fn peekRaw(self: *Reader) Error!?u8 {
+        if (self.push_len > 0) return self.push[0];
         const s = self.src.peek(1) catch |e| switch (e) {
             error.EndOfStream => return null,
             error.ReadFailed => return error.ReadFailed,
@@ -200,16 +224,67 @@ pub const Reader = struct {
         return s[0];
     }
 
+    fn tossRaw(self: *Reader) void {
+        if (self.push_len > 0) {
+            self.push_len -= 1;
+            self.push[0] = self.push[1];
+        } else self.src.toss(1);
+    }
+
+    fn takeRaw(self: *Reader) Error!?u8 {
+        const b = (try self.peekRaw()) orelse return null;
+        self.tossRaw();
+        return b;
+    }
+
+    /// Decodes the next character of a UTF-16 or Latin-1 document into `pend`; false at the end.
+    fn decodeNext(self: *Reader) Error!bool {
+        var cp: u21 = undefined;
+        if (self.enc == .latin1) {
+            cp = (try self.takeRaw()) orelse return false;
+        } else {
+            const unit = (try self.takeUnit()) orelse return false;
+            if (unit >= 0xDC00 and unit <= 0xDFFF) return self.fail(error.InvalidCharacter, "a lone low surrogate in UTF-16");
+            if (unit >= 0xD800 and unit <= 0xDBFF) {
+                const low = (try self.takeUnit()) orelse return self.fail(error.UnexpectedEof, "the document ends inside a UTF-16 surrogate pair");
+                if (low < 0xDC00 or low > 0xDFFF) return self.fail(error.InvalidCharacter, "a high surrogate without its low surrogate in UTF-16");
+                cp = 0x10000 + ((@as(u21, unit) - 0xD800) << 10) + (low - 0xDC00);
+            } else cp = unit;
+        }
+        const n = std.unicode.utf8Encode(cp, &self.pend) catch return self.fail(error.InvalidCharacter, "a character that cannot be represented");
+        self.pend_len = @intCast(n);
+        self.pend_pos = 0;
+        return true;
+    }
+
+    fn takeUnit(self: *Reader) Error!?u16 {
+        const b0 = (try self.takeRaw()) orelse return null;
+        const b1 = (try self.takeRaw()) orelse return self.fail(error.UnexpectedEof, "the document ends inside a UTF-16 character");
+        return if (self.enc == .utf16le) @as(u16, b1) << 8 | b0 else @as(u16, b0) << 8 | b1;
+    }
+
+    fn peekByte(self: *Reader) Error!?u8 {
+        if (self.enc == .utf8) return self.peekRaw();
+        if (self.pend_pos >= self.pend_len) {
+            if (!try self.decodeNext()) return null;
+        }
+        return self.pend[self.pend_pos];
+    }
+
+    fn tossByte(self: *Reader) void {
+        if (self.enc == .utf8) self.tossRaw() else self.pend_pos += 1;
+    }
+
     /// The next byte with line ends normalized (`\r\n` and `\r` become `\n`), or null at the end.
     fn takeByte(self: *Reader) Error!?u8 {
         var b = (try self.peekByte()) orelse return null;
         if (self.options.max_input_bytes != 0 and self.consumed >= self.options.max_input_bytes)
             return self.fail(error.LimitExceeded, "the input is larger than the configured limit");
-        self.src.toss(1);
+        self.tossByte();
         self.consumed += 1;
         if (b == '\r') {
             if ((try self.peekByte()) == @as(u8, '\n')) {
-                self.src.toss(1);
+                self.tossByte();
                 self.consumed += 1;
             }
             b = '\n';
@@ -270,16 +345,40 @@ pub const Reader = struct {
     }
 
     fn readStart(self: *Reader) Error!Event {
-        // Byte order mark; UTF-16 is recognised only to be refused clearly.
-        const head = (try self.peekByte()) orelse return self.fail(error.UnexpectedEof, "the document is empty");
-        if (head == 0xEF) {
-            for ("\xEF\xBB\xBF") |want| {
-                const b = (try self.takeByte()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
-                if (b != want) return self.fail(error.InvalidSyntax, "the document does not start with XML");
-            }
-        } else if (head == 0xFE or head == 0xFF or head == 0x00) {
-            // A UTF-16 byte order mark, or UTF-16 without one (`\0<`).
-            return self.fail(error.UnsupportedEncoding, "UTF-16 documents are not supported; convert to UTF-8");
+        // Byte order mark, or the first bytes of `<?` in UTF-16 (XML 1.0, appendix F).
+        const head = (try self.peekRaw()) orelse return self.fail(error.UnexpectedEof, "the document is empty");
+        switch (head) {
+            0xEF => {
+                for ("\xEF\xBB\xBF") |want| {
+                    const b = (try self.takeRaw()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                    if (b != want) return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                }
+                self.had_utf8_bom = true;
+            },
+            0xFE, 0xFF => {
+                _ = try self.takeRaw();
+                const second = (try self.takeRaw()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                if (head == 0xFE and second == 0xFF) {
+                    self.enc = .utf16be;
+                } else if (head == 0xFF and second == 0xFE) {
+                    self.enc = .utf16le;
+                } else return self.fail(error.UnsupportedEncoding, "the byte order mark is not UTF-8 or UTF-16");
+            },
+            0x00, '<' => {
+                // UTF-16 without a mark starts `\0<` (big endian) or `<\0` (little endian).
+                _ = try self.takeRaw();
+                self.push[0] = head;
+                self.push_len = 1;
+                const second = self.src.peek(1) catch |e| switch (e) {
+                    error.EndOfStream => null,
+                    error.ReadFailed => return error.ReadFailed,
+                };
+                if (head == 0x00) {
+                    if (second == null or second.?[0] != '<') return self.fail(error.UnsupportedEncoding, "this encoding is not supported (UTF-8, UTF-16 and ISO-8859-1 are)");
+                    self.enc = .utf16be;
+                } else if (second != null and second.?[0] == 0x00) self.enc = .utf16le;
+            },
+            else => {},
         }
         self.state = .prolog;
         return self.readMisc();
@@ -337,11 +436,30 @@ pub const Reader = struct {
         if (v.len < 3 or !std.mem.startsWith(u8, v, "1.")) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
         for (v[2..]) |d| if (!std.ascii.isDigit(d)) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
         if (std.mem.eql(u8, v, "1.1")) return self.fail(error.UnsupportedVersion, "XML 1.1 is not supported");
-        if (encoding) |enc| {
-            if (!std.ascii.eqlIgnoreCase(enc, "utf-8") and !std.ascii.eqlIgnoreCase(enc, "us-ascii"))
-                return self.fail(error.UnsupportedEncoding, "only UTF-8 and US-ASCII documents are supported");
-        }
+        if (encoding) |enc| try self.applyDeclaredEncoding(enc);
         return .{ .xml_decl = .{ .version = v, .encoding = encoding, .standalone = standalone } };
+    }
+
+    /// Checks the encoding named in the declaration against how the document was detected, and
+    /// switches to ISO-8859-1 decoding if that is what it says.
+    fn applyDeclaredEncoding(self: *Reader, enc: []const u8) Error!void {
+        const eql = std.ascii.eqlIgnoreCase;
+        const is_utf16 = eql(enc, "utf-16") or eql(enc, "utf-16le") or eql(enc, "utf-16be");
+        const is_latin1 = eql(enc, "iso-8859-1") or eql(enc, "iso_8859-1") or eql(enc, "latin1") or eql(enc, "latin-1") or eql(enc, "l1");
+        switch (self.enc) {
+            .utf16le, .utf16be => {
+                if (!is_utf16) return self.fail(error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
+            },
+            .utf8 => {
+                if (eql(enc, "utf-8") or eql(enc, "us-ascii")) return;
+                if (is_latin1 and !self.had_utf8_bom and self.pend_len == 0) {
+                    self.enc = .latin1;
+                    return;
+                }
+                return self.fail(error.UnsupportedEncoding, "unsupported or conflicting encoding (UTF-8, US-ASCII, UTF-16 and ISO-8859-1 are supported)");
+            },
+            .latin1 => {},
+        }
     }
 
     /// Prolog and epilog: whitespace, comments, processing instructions, the
@@ -421,16 +539,20 @@ pub const Reader = struct {
             return;
         }
         // A name, then `;`.
-        var name: [8]u8 = undefined;
+        var name: [64]u8 = undefined;
         var n: usize = 0;
         var c = first;
         while (c != ';') : (c = try self.mustTake()) {
             if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.fail(error.UndefinedEntity, "a & that does not start a reference (write &amp;)");
-            if (n >= name.len) return self.fail(error.UndefinedEntity, "an entity other than lt, gt, amp, quot, apos");
+            if (n >= name.len) return self.fail(error.UndefinedEntity, "an entity name that is too long");
             name[n] = c;
             n += 1;
         }
         const s = name[0..n];
+        for (self.options.entities) |e| if (std.mem.eql(u8, e.name, s)) {
+            for (e.value) |x| try self.append(out, x);
+            return;
+        };
         const rep: u8 = if (std.mem.eql(u8, s, "lt")) '<' else if (std.mem.eql(u8, s, "gt")) '>' else if (std.mem.eql(u8, s, "amp")) '&' else if (std.mem.eql(u8, s, "quot")) '"' else if (std.mem.eql(u8, s, "apos")) '\'' else return self.fail(error.UndefinedEntity, "an entity other than lt, gt, amp, quot, apos");
         try self.append(out, rep);
     }

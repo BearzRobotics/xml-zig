@@ -23,6 +23,7 @@ pub const Attribute = reader.Attribute;
 pub const Decl = reader.Decl;
 pub const Options = reader.Options;
 pub const DoctypeMode = reader.DoctypeMode;
+pub const Entity = reader.Entity;
 pub const Diagnostic = reader.Diagnostic;
 pub const Error = reader.Error;
 pub const Writer = writer.Writer;

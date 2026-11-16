@@ -95,11 +95,16 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<?xml version='2.0'?><a/>", .err = error.InvalidSyntax },
     .{ .src = "<?xml version='1.1'?><a/>", .err = error.UnsupportedVersion },
     .{ .src = "<?xml version='1.'?><a/>", .err = error.InvalidSyntax },
-    .{ .src = "<?xml version='1.0' encoding='latin-1'?><a/>", .err = error.UnsupportedEncoding },
+    .{ .src = "<?xml version='1.0' encoding='shift_jis'?><a/>", .err = error.UnsupportedEncoding },
+    .{ .src = "<?xml version='1.0' encoding='utf-16'?><a/>", .err = error.UnsupportedEncoding }, // declared UTF-16 but read as UTF-8
+    .{ .src = "\xEF\xBB\xBF<?xml version='1.0' encoding='iso-8859-1'?><a/>", .err = error.UnsupportedEncoding },
     .{ .src = "<?xml encoding='utf-8' version='1.0'?><a/>", .err = error.InvalidSyntax },
     .{ .src = "<?xml version='1.0' standalone='maybe'?><a/>", .err = error.InvalidSyntax },
-    .{ .src = "\xFE\xFF\x00<\x00a\x00/", .err = error.UnsupportedEncoding }, // UTF-16
-    .{ .src = "\xFF\xFE<\x00a\x00/\x00>\x00", .err = error.UnsupportedEncoding },
+    .{ .src = "\xFE\xFF\x00<\x00a\x00/", .err = error.UnexpectedEof }, // UTF-16 cut short
+    .{ .src = "\xFE\xFF\x00<\x00a\x00/\x00", .err = error.UnexpectedEof },
+    .{ .src = "\xFF\xFE<\x00a\x00/\x00>\x00\x3d", .err = error.UnexpectedEof }, // half a code unit
+    .{ .src = "\xFE\xFE<a/>", .err = error.UnsupportedEncoding },
+    .{ .src = "\x00\x01", .err = error.UnsupportedEncoding },
     .{ .src = "<a>\x01</a>", .err = error.InvalidCharacter }, // production 2
     .{ .src = "<a>\xFF</a>", .err = error.InvalidCharacter },
     .{ .src = "<a>\xEF\xBF\xBE</a>", .err = error.InvalidCharacter },
@@ -345,4 +350,93 @@ test "writer output reads back as the same tree" {
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("5 < 6 && 7 > 3 \u{1F600}", text);
     try testing.expect(doc.root.child("empty") != null);
+}
+
+/// `text` as UTF-16, allocated from `a`.
+fn utf16(a: std.mem.Allocator, text: []const u8, big: bool, bom: bool) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    if (bom) try out.appendSlice(a, if (big) "\xFE\xFF" else "\xFF\xFE");
+    var view = try std.unicode.Utf8View.init(text);
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        var units: [2]u16 = undefined;
+        var n: usize = 1;
+        if (cp >= 0x10000) {
+            units[0] = @intCast(0xD800 + ((cp - 0x10000) >> 10));
+            units[1] = @intCast(0xDC00 + ((cp - 0x10000) & 0x3FF));
+            n = 2;
+        } else units[0] = @intCast(cp);
+        for (units[0..n]) |u| {
+            const hi: u8 = @intCast(u >> 8);
+            const lo: u8 = @intCast(u & 0xFF);
+            try out.appendSlice(a, if (big) &[2]u8{ hi, lo } else &[2]u8{ lo, hi });
+        }
+    }
+    return out.items;
+}
+
+fn firstText(src: []const u8, options: xml.Options) ![]u8 {
+    var r: Io.Reader = .fixed(src);
+    var rd = xml.Reader.init(testing.allocator, &r, options, null);
+    defer rd.deinit();
+    while (true) switch (try rd.next()) {
+        .text => |t| return testing.allocator.dupe(u8, t),
+        .end_of_document => return testing.allocator.dupe(u8, ""),
+        else => {},
+    };
+}
+
+test "UTF-16 documents are read, with or without a byte order mark" {
+    const doc = "<?xml version='1.0' encoding='UTF-16'?><a>h\u{e9}llo \u{65e5}\u{672c} \u{1F600}</a>";
+    const plain = "<a>h\u{e9}llo \u{65e5}\u{672c} \u{1F600}</a>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ try utf16(a, doc, true, true), try utf16(a, doc, false, true), try utf16(a, plain, true, false), try utf16(a, plain, false, false) }) |src| {
+        const t = try firstText(src, .{});
+        defer testing.allocator.free(t);
+        try testing.expectEqualStrings("h\u{e9}llo \u{65e5}\u{672c} \u{1F600}", t);
+    }
+    // A declaration that says UTF-8 on a UTF-16 document is a conflict.
+    try testing.expectError(error.UnsupportedEncoding, drain(try utf16(a, "<?xml version='1.0' encoding='UTF-8'?><a/>", true, true), .{}));
+    // A lone surrogate is not a character.
+    try testing.expectError(error.InvalidCharacter, drain("\xFE\xFF\x00<\x00a\x00>\xDC\x00\x00<\x00/\x00a\x00>", .{}));
+    try testing.expectError(error.InvalidCharacter, drain("\xFE\xFF\x00<\x00a\x00>\xD8\x00\x00A\x00<\x00/\x00a\x00>", .{}));
+}
+
+test "ISO-8859-1 documents are converted to UTF-8" {
+    const t = try firstText("<?xml version='1.0' encoding='ISO-8859-1'?><a>caf\xE9 \xA3 \xFF</a>", .{});
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("caf\u{e9} \u{a3} \u{ff}", t);
+    // Names too, and the declaration's own spelling is not case sensitive.
+    try drain("<?xml version='1.0' encoding='latin1'?><caf\xE9/>", .{});
+}
+
+test "the one-byte-at-a-time reader gives the same result for every encoding" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const doc = try utf16(arena.allocator(), "<?xml version='1.0'?><a x='1'>\u{e9}\u{1F600}</a>", false, true);
+    var buf: [2]u8 = undefined;
+    var t = Trickle.init(&buf, doc, 1, null);
+    try drainReader(&t.interface, .{});
+    const latin = "<?xml version='1.0' encoding='latin1'?><a>\xE9</a>";
+    var t2 = Trickle.init(&buf, latin, 1, null);
+    try drainReader(&t2.interface, .{});
+}
+
+test "caller-supplied entities" {
+    const entities = [_]xml.Entity{ .{ .name = "nbsp", .value = "\u{a0}" }, .{ .name = "co", .value = "ACME <&> Corp" } };
+    const t = try firstText("<a>x&nbsp;y &co;</a>", .{ .entities = &entities });
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("x\u{a0}y ACME <&> Corp", t);
+    // In attribute values too; and unknown names are still errors.
+    var r: Io.Reader = .fixed("<a v='&co;'/>");
+    var rd = xml.Reader.init(testing.allocator, &r, .{ .entities = &entities }, null);
+    defer rd.deinit();
+    try testing.expectEqualStrings("ACME <&> Corp", (try rd.next()).start_element.attributes[0].value);
+    try testing.expectError(error.UndefinedEntity, drain("<a>&other;</a>", .{ .entities = &entities }));
+    try testing.expectError(error.UndefinedEntity, drain("<a>&nbsp;</a>", .{}));
+    // A value is text, never markup: it is checked like any other text.
+    const bad = [_]xml.Entity{.{ .name = "ctl", .value = "\x01" }};
+    try testing.expectError(error.InvalidCharacter, drain("<a>&ctl;</a>", .{ .entities = &bad }));
 }

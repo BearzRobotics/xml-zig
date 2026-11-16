@@ -8,13 +8,13 @@ A small, dependency-free XML parser and writer for Zig 0.17, written first for d
 
 ## Requirements
 
-- **XML-1 (MUST):** Accept every well-formed XML 1.0 document that is UTF-8 (or US-ASCII) and whose only entities are the five predefined ones and character references: elements, attributes, text, CDATA sections, comments, processing instructions, the XML declaration, and a DOCTYPE (read and reported, not acted on).
+- **XML-1 (MUST):** Accept every well-formed XML 1.0 document that is UTF-8, US-ASCII, UTF-16 (with or without a byte order mark) or ISO-8859-1, and whose only entities are the five predefined ones, character references and any the caller supplies in `Options.entities`: elements, attributes, text, CDATA sections, comments, processing instructions, the XML declaration, and a DOCTYPE (read and reported, not acted on).
 - **XML-2 (MUST):** Refuse documents that are not well-formed, with a specific error and a 1-based line and column: mismatched or unclosed tags, no or several root elements, text outside the root, duplicate attributes, unquoted or `<`-containing attribute values, illegal names, characters outside `Char` (production 2), invalid UTF-8, `]]>` in text, `--` in comments, bad references, a misplaced XML declaration.
 - **XML-3 (MUST):** Namespaces: resolve prefixes through nested scopes (`xmlns`, `xmlns:p`, `xmlns=""`), the reserved `xml` prefix, per-element and per-attribute URIs; an undeclared prefix, a duplicate expanded attribute name, or an empty prefix binding is an error. `Options.namespaces = false` treats prefixes as ordinary name characters.
 - **XML-4 (MUST):** Treat input as untrusted: bounded depth (`max_depth`, default 256), name length, attribute count, token size (default 16 MiB) and total input (`max_input_bytes`); no recursion in the parser; no undefined behaviour on malformed bytes. Random and mutated inputs are tested.
 - **XML-5 (MUST):** No entity expansion, no external resources: declared entities are skipped and a reference to one is `error.UndefinedEntity`. `Options.doctype = .reject` refuses any DOCTYPE.
 - **XML-6 (MUST):** Use `std.Io` for all input and output: pull events from a `*std.Io.Reader` with one byte of lookahead, write to a `*std.Io.Writer`; no file-system or OS calls in the library. Tested with one-byte and failing readers and a one-byte buffer.
-- **XML-7 (MUST):** Line ends (`\r\n`, `\r`) are normalized to `\n`; attribute values are whitespace-normalized as for CDATA attributes; a BOM is accepted; UTF-16 is refused with a clear error.
+- **XML-7 (MUST):** Line ends (`\r\n`, `\r`) are normalized to `\n`; attribute values are whitespace-normalized as for CDATA attributes; a BOM is accepted; UTF-16 and ISO-8859-1 are converted to UTF-8 on the way in; a declared encoding that contradicts the detected one is refused.
 - **XML-8 (MUST):** One owner: a `Document` owns an arena and `deinit` frees it; event data is borrowed until the next call. No leaks on error or allocation failure (tested with `FailingAllocator`).
 - **XML-9 (MUST):** A writer that escapes text and attribute values, rejects invalid names, characters and content, tracks open elements so `end` always matches, and produces output that parses back to the same tree.
 - **XML-10 (SHOULD):** No dependencies beyond the Zig standard library. Met.
@@ -34,12 +34,12 @@ try w.declaration(); try w.start("a"); try w.attribute("k", "v"); try w.text("t"
 
 ## Known deviations and limits
 
-- Only UTF-8 and US-ASCII input. UTF-16 and other declared encodings are refused (`error.UnsupportedEncoding`).
-- Only XML 1.0; a declaration of version 1.1 is `error.UnsupportedVersion`.
-- DTDs are not interpreted: no declared entities, no default attribute values, no attribute-type normalization (tokenized attributes are not trimmed), no validation. A document that depends on them is refused (undefined entity) or read without those effects.
+- Input encodings: UTF-8, US-ASCII, UTF-16 and ISO-8859-1. Any other (Shift_JIS, EUC-JP, UTF-32, windows-1252 and so on) is `error.UnsupportedEncoding`.
+- Only XML 1.0 (any `1.n` except `1.1` is read with 1.0 rules, as the fifth edition allows); a declaration of version 1.1 is `error.UnsupportedVersion`.
+- DTDs are not interpreted: no declared entities (use `Options.entities` to supply names yourself), no default attribute values, no attribute-type normalization (tokenized attributes are not trimmed), no validation. A document that depends on them is refused (undefined entity) or read without those effects.
 - The Namespaces constraints that depend on URI syntax are not checked (a namespace name is any non-empty string).
 - A text run or attribute value is held in memory whole (bounded by `max_token_bytes`); the tree keeps the whole document.
-- The W3C XML Conformance Test Suite is **not** vendored and has **not** been run. Treat "conformant" as unverified until it is. The cases in `src/tests.zig` come from the specification text.
+- Conformance: the W3C XML Conformance Test Suite (xmlts20130923, fetched by `scripts/fetch-conformance.sh`, not vendored) is run by `zig build conformance -Dsuite=DIR/xmlconf`. Result: 1487 pass, 0 fail; 83 valid documents use entities they declare or import and 404 not-well-formed ones are faulty only inside a DTD (both follow from "DTDs are not interpreted"); 338 are XML 1.1 or fifth-edition-excluded cases and are skipped. The cases in `src/tests.zig` come from the specification text and from failures the suite found.
 - Parsing is single-threaded; documents are not safe for concurrent mutation.
 
 ## Measurements
