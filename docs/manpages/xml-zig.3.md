@@ -21,10 +21,10 @@ Options: `entities` (extra `&name;` replacements supplied by the caller), `names
 Errors: `InvalidSyntax`, `InvalidName`, `InvalidCharacter`, `UnexpectedEof`, `MismatchedTag`, `DuplicateAttribute`, `UndefinedEntity`, `InvalidCharacterReference`, `UnboundPrefix`, `UnsupportedEncoding` (anything but UTF-8, US-ASCII, UTF-16, ISO-8859-1), `UnsupportedVersion` (1.1), `DoctypeNotAllowed`, `LimitExceeded`, `ReadFailed`, `OutOfMemory`. `Diagnostic` holds `line`, `column` and `message`.
 
 DOCUMENT
-`Document.parse(gpa, bytes, Options, ?*Diagnostic)`, `Document.parseReader(gpa, *std.Io.Reader, ...)`, `Document.deinit()`. `Document.root` is an `*Element` with `name`, `attributes`, `children` and the methods `attr`, `attrNs`, `child`, `childNs`, `elements`, `appendText`, `textContent`.
+`Document.parse(gpa, bytes, Options, ?*Diagnostic)`, `Document.parseReader(gpa, *std.Io.Reader, ...)`, `Document.write(gpa, *std.Io.Writer, WriteOptions)` (writes the tree back with its comments, processing instructions, CDATA, DOCTYPE and declaration), `Document.deinit()`. `Document.prolog` and `Document.epilog` hold what is outside the root; `Document.declaration` is the XML declaration. Options: `keep_comments` (true), `trim_blank_text`, `reader`. `Document.root` is an `*Element` with `name`, `attributes`, `children` and the methods `attr`, `attrNs`, `child`, `childNs`, `elements`, `appendText`, `textContent`.
 
 WRITER
-`Writer.init(gpa, *std.Io.Writer, Options)`; `declaration`, `start`, `attribute`, `text`, `cdata`, `comment`, `end`, `finish`, `deinit`. `Options.indent` is spaces per level (0 = none).
+`Writer.init(gpa, *std.Io.Writer, Options)`; `declaration`, `declarationWith`, `processingInstruction`, `doctype`, `lineBreak`, `start`, `attribute`, `text`, `cdata`, `comment`, `end`, `endExpanded`, `finish`, `deinit`. `Options.indent` is spaces per level (0 = none).
 
 CONFORMING TO
 XML 1.0 (Fifth Edition) and Namespaces in XML 1.0 (Third Edition), with the deviations listed in `ai/SPEC.md`.

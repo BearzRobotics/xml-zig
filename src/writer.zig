@@ -57,8 +57,60 @@ pub const Writer = struct {
 
     /// `<?xml version="1.0" encoding="UTF-8"?>` and a newline.
     pub fn declaration(self: *Writer) Error!void {
+        return self.declarationWith("1.0", "UTF-8", null);
+    }
+
+    /// An XML declaration with the given pseudo-attributes, and a newline. Note the writer always
+    /// writes UTF-8: an `encoding` other than UTF-8 would be a lie, so it is refused.
+    pub fn declarationWith(self: *Writer, version: []const u8, encoding: ?[]const u8, standalone: ?bool) Error!void {
         if (self.wrote_root or self.lens.items.len > 0) return error.InvalidState;
-        self.out.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch |e| return werr(e);
+        if (version.len < 3 or !std.mem.startsWith(u8, version, "1.")) return error.InvalidContent;
+        for (version[2..]) |c| if (!std.ascii.isDigit(c)) return error.InvalidContent;
+        self.out.writeAll("<?xml version=\"") catch |e| return werr(e);
+        self.out.writeAll(version) catch |e| return werr(e);
+        self.out.writeByte('"') catch |e| return werr(e);
+        // The text is always written as UTF-8 (US-ASCII is a subset); a declaration that names
+        // another encoding is replaced by the truth.
+        if (encoding != null) self.out.writeAll(" encoding=\"UTF-8\"") catch |e| return werr(e);
+        if (standalone) |s| self.out.writeAll(if (s) " standalone=\"yes\"" else " standalone=\"no\"") catch |e| return werr(e);
+        self.out.writeAll("?>\n") catch |e| return werr(e);
+    }
+
+    /// A processing instruction (`<?target data?>`).
+    pub fn processingInstruction(self: *Writer, target: []const u8, data: []const u8) Error!void {
+        if (!chars.isName(target) or std.ascii.eqlIgnoreCase(target, "xml")) return error.InvalidName;
+        if (!chars.validText(data)) return error.InvalidCharacter;
+        if (std.mem.indexOf(u8, data, "?>") != null) return error.InvalidContent;
+        try self.closeTag();
+        try self.indentMarkup();
+        self.out.writeAll("<?") catch |e| return werr(e);
+        self.out.writeAll(target) catch |e| return werr(e);
+        if (data.len > 0) {
+            self.out.writeByte(' ') catch |e| return werr(e);
+            self.out.writeAll(data) catch |e| return werr(e);
+        }
+        self.out.writeAll("?>") catch |e| return werr(e);
+    }
+
+    /// Starts a comment or processing instruction on its own line when it sits among elements only.
+    fn indentMarkup(self: *Writer) Error!void {
+        const depth = self.lens.items.len;
+        if (depth > 0 and self.only_elements.items[depth - 1]) try self.newline(depth);
+    }
+
+    /// A DOCTYPE, written as read (`raw` is the text between `<!DOCTYPE` and `>`). Only before the root.
+    pub fn doctype(self: *Writer, raw: []const u8) Error!void {
+        if (self.wrote_root or self.lens.items.len > 0) return error.InvalidState;
+        if (!chars.validText(raw)) return error.InvalidCharacter;
+        self.out.writeAll("<!DOCTYPE ") catch |e| return werr(e);
+        self.out.writeAll(raw) catch |e| return werr(e);
+        self.out.writeAll(">") catch |e| return werr(e);
+    }
+
+    /// A line break between items outside the root element (after the declaration, comments and so on).
+    pub fn lineBreak(self: *Writer) Error!void {
+        if (self.lens.items.len > 0) return error.InvalidState;
+        self.out.writeByte('\n') catch |e| return werr(e);
     }
 
     fn closeTag(self: *Writer) Error!void {
@@ -147,6 +199,7 @@ pub const Writer = struct {
         if (!chars.validText(s)) return error.InvalidCharacter;
         if (std.mem.indexOf(u8, s, "--") != null or std.mem.endsWith(u8, s, "-")) return error.InvalidContent;
         try self.closeTag();
+        try self.indentMarkup();
         self.out.writeAll("<!--") catch |e| return werr(e);
         self.out.writeAll(s) catch |e| return werr(e);
         self.out.writeAll("-->") catch |e| return werr(e);
@@ -154,14 +207,24 @@ pub const Writer = struct {
 
     /// Ends the innermost open element; an element with no content is written as `<a/>`.
     pub fn end(self: *Writer) Error!void {
+        return self.endWith(false);
+    }
+
+    /// Like `end`, but an element with no content is written `<a></a>`.
+    pub fn endExpanded(self: *Writer) Error!void {
+        return self.endWith(true);
+    }
+
+    fn endWith(self: *Writer, expand: bool) Error!void {
         const len = self.lens.pop() orelse return error.InvalidState;
         const only = self.only_elements.pop().?;
         const name = self.names.items[self.names.items.len - len ..];
         defer self.names.items.len -= len;
-        if (self.in_tag) {
+        if (self.in_tag and !expand) {
             self.out.writeAll("/>") catch |e| return werr(e);
             self.in_tag = false;
         } else {
+            try self.closeTag();
             if (only) try self.newline(self.lens.items.len);
             self.out.writeAll("</") catch |e| return werr(e);
             self.out.writeAll(name) catch |e| return werr(e);

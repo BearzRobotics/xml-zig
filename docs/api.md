@@ -32,7 +32,18 @@ const text = try p.textContent(gpa); // you own the result
 defer gpa.free(text);
 ```
 
-`Options` (for `Document`): `keep_comments`, `trim_blank_text`, and `reader` for the reader's options.
+`Options` (for `Document`): `keep_comments` (default true: comments and processing instructions are kept, inside the root and in `doc.prolog` / `doc.epilog`; CDATA sections stay CDATA nodes), `trim_blank_text` (drop whitespace-only text), and `reader` for the reader's options.
+
+## Write a tree back, with its comments
+
+```zig
+var doc = try xml.Document.parse(gpa, bytes, .{}, null);
+defer doc.deinit();
+// ... read or look things up ...
+try doc.write(gpa, &out, .{});   // comments, processing instructions, CDATA, DOCTYPE and the declaration survive
+```
+
+What is normalized: quote style and spaces inside tags, how a character was written (`&#65;` comes back as `A`), and `<a></a>` versus `<a/>` is kept. Whitespace between elements is kept as text unless `trim_blank_text` was set; `WriteOptions.indent` re-indents elements that hold no text. A document already in the writer's own style comes back byte for byte.
 
 ## Errors
 

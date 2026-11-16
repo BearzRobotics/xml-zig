@@ -21,6 +21,7 @@ while (true) switch (try rd.next()) {
 var doc = try xml.Document.parse(gpa, bytes, .{}, &diag);
 defer doc.deinit();
 const body = doc.root.childNs(ns, "body");
+try doc.write(gpa, &out, .{}); // and back out, comments included
 ```
 
 - Checks well-formedness (matching tags, one root, unique attributes, legal names and characters, valid references), UTF-8, and namespace prefixes; errors carry a 1-based line and column.
