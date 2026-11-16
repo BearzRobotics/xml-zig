@@ -16,4 +16,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit and conformance tests");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);
+
+    // A command line over the library: check, list events, extract text.
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("bench/xml_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xml", .module = mod }},
+    });
+    const cli_exe = b.addExecutable(.{ .name = "xml-parse", .root_module = cli_mod });
+    const cli_step = b.step("cli", "Build zig-out/bin/xml-parse");
+    cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
 }

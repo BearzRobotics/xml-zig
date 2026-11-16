@@ -157,6 +157,8 @@ pub const Reader = struct {
     last_name: std.ArrayList(u8) = .empty,
     root_seen: bool = false,
     doctype_seen: bool = false,
+    /// No event has been produced yet and no whitespace consumed: an XML declaration is still allowed.
+    first_token: bool = true,
 
     pub fn init(gpa: Allocator, src: *Io.Reader, options: Options, diag: ?*Diagnostic) Reader {
         return .{ .gpa = gpa, .src = src, .options = options, .diag = diag };
@@ -248,6 +250,12 @@ pub const Reader = struct {
     // ------------------------------------------------------------ events
 
     pub fn next(self: *Reader) Error!Event {
+        const ev = try self.nextEvent();
+        self.first_token = false;
+        return ev;
+    }
+
+    fn nextEvent(self: *Reader) Error!Event {
         if (self.pending_end) {
             self.pending_end = false;
             const ev = try self.endCurrent();
@@ -263,44 +271,22 @@ pub const Reader = struct {
 
     fn readStart(self: *Reader) Error!Event {
         // Byte order mark; UTF-16 is recognised only to be refused clearly.
-        const head = self.src.peek(1) catch |e| switch (e) {
-            error.EndOfStream => return self.fail(error.UnexpectedEof, "the document is empty"),
-            error.ReadFailed => return error.ReadFailed,
-        };
-        if (head[0] == 0xEF) {
-            const bom = self.src.peek(3) catch return self.fail(error.InvalidSyntax, "the document does not start with XML");
-            if (std.mem.eql(u8, bom, "\xEF\xBB\xBF")) {
-                self.src.toss(3);
-                self.consumed += 3;
+        const head = (try self.peekByte()) orelse return self.fail(error.UnexpectedEof, "the document is empty");
+        if (head == 0xEF) {
+            for ("\xEF\xBB\xBF") |want| {
+                const b = (try self.takeByte()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                if (b != want) return self.fail(error.InvalidSyntax, "the document does not start with XML");
             }
-        } else if (head[0] == 0xFE or head[0] == 0xFF or head[0] == 0x00) {
+        } else if (head == 0xFE or head == 0xFF or head == 0x00) {
             // A UTF-16 byte order mark, or UTF-16 without one (`\0<`).
             return self.fail(error.UnsupportedEncoding, "UTF-16 documents are not supported; convert to UTF-8");
         }
         self.state = .prolog;
-        // An XML declaration is only allowed right here.
-        if ((try self.peekByte()) == @as(u8, '<')) {
-            const four = self.src.peek(5) catch &[_]u8{};
-            if (four.len == 5 and std.mem.eql(u8, four[0..5], "<?xml")) {
-                const sixth = self.src.peek(6) catch &[_]u8{};
-                if (sixth.len == 6 and chars.isSpace(sixth[5])) return self.readXmlDecl();
-            }
-        }
         return self.readMisc();
     }
 
+    /// The pseudo-attributes of an XML declaration; `self.buf` holds the text after `<?xml`.
     fn readXmlDecl(self: *Reader) Error!Event {
-        try self.expect("<?xml");
-        self.buf.clearRetainingCapacity();
-        // Everything up to `?>`.
-        while (true) {
-            const b = try self.mustTake();
-            if (b == '?' and (try self.peekByte()) == @as(u8, '>')) {
-                _ = try self.takeByte();
-                break;
-            }
-            try self.append(&self.buf, b);
-        }
         if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid character in the XML declaration");
         const text = self.buf.items;
         var version: ?[]const u8 = null;
@@ -353,7 +339,7 @@ pub const Reader = struct {
     /// DOCTYPE (prolog only) and, in the prolog, the root element.
     fn readMisc(self: *Reader) Error!Event {
         while (true) {
-            _ = try self.skipSpace();
+            if (try self.skipSpace()) self.first_token = false;
             const b = (try self.peekByte()) orelse {
                 if (self.state == .prolog) return self.fail(error.UnexpectedEof, "the document has no root element");
                 self.state = .done;
@@ -430,6 +416,7 @@ pub const Reader = struct {
         var n: usize = 0;
         var c = first;
         while (c != ';') : (c = try self.mustTake()) {
+            if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.fail(error.UndefinedEntity, "a & that does not start a reference (write &amp;)");
             if (n >= name.len) return self.fail(error.UndefinedEntity, "an entity other than lt, gt, amp, quot, apos");
             name[n] = c;
             n += 1;
@@ -498,7 +485,21 @@ pub const Reader = struct {
         while (!chars.isSpace(c) and c != '?') : (c = try self.mustTake()) try self.append(&self.buf, c);
         const target_len = self.buf.items.len;
         if (!chars.isName(self.buf.items)) return self.fail(error.InvalidName, "bad processing instruction target");
-        if (std.ascii.eqlIgnoreCase(self.buf.items, "xml")) return self.fail(error.InvalidSyntax, "an XML declaration is only allowed at the very start");
+        const is_decl_target = std.mem.eql(u8, self.buf.items, "xml");
+        if (std.ascii.eqlIgnoreCase(self.buf.items, "xml") and !(is_decl_target and self.first_token and chars.isSpace(c)))
+            return self.fail(error.InvalidSyntax, "an XML declaration is only allowed at the very start");
+        if (is_decl_target and self.first_token) {
+            self.buf.clearRetainingCapacity();
+            while (true) {
+                const b = try self.mustTake();
+                if (b == '?' and (try self.peekByte()) == @as(u8, '>')) {
+                    _ = try self.takeByte();
+                    break;
+                }
+                try self.append(&self.buf, b);
+            }
+            return self.readXmlDecl();
+        }
         if (c == '?') {
             if ((try self.mustTake()) != '>') return self.fail(error.InvalidSyntax, "malformed processing instruction");
             return .{ .processing_instruction = .{ .target = self.buf.items[0..target_len], .data = "" } };
@@ -524,10 +525,20 @@ pub const Reader = struct {
         self.buf.clearRetainingCapacity();
         var bracket_depth: u32 = 0;
         var quote: u8 = 0;
+        var skipping: enum { no, comment, pi } = .no;
         while (true) {
             const b = try self.mustTake();
-            if (quote != 0) {
+            const so_far = self.buf.items;
+            if (skipping == .comment) {
+                if (b == '>' and std.mem.endsWith(u8, so_far, "--")) skipping = .no;
+            } else if (skipping == .pi) {
+                if (b == '>' and std.mem.endsWith(u8, so_far, "?")) skipping = .no;
+            } else if (quote != 0) {
                 if (b == quote) quote = 0;
+            } else if (bracket_depth > 0 and b == '-' and std.mem.endsWith(u8, so_far, "<!-")) {
+                skipping = .comment;
+            } else if (bracket_depth > 0 and b == '?' and std.mem.endsWith(u8, so_far, "<")) {
+                skipping = .pi;
             } else switch (b) {
                 '"', '\'' => quote = b,
                 '[' => bracket_depth += 1,
