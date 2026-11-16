@@ -294,9 +294,14 @@ pub const Reader = struct {
         var standalone: ?bool = null;
         var i: usize = 0;
         var seen: u8 = 0; // order check: version, encoding, standalone
+        var first_attr = true;
         while (true) {
+            const before = i;
             while (i < text.len and chars.isSpace(text[i])) i += 1;
             if (i >= text.len) break;
+            // Each pseudo-attribute is set off by whitespace (production 23 and following).
+            if (i == before and !first_attr) return self.fail(error.InvalidSyntax, "pseudo-attributes of the XML declaration must be separated by whitespace");
+            first_attr = false;
             const ns = i;
             while (i < text.len and text[i] != '=' and !chars.isSpace(text[i])) i += 1;
             const key = text[ns..i];
@@ -327,7 +332,11 @@ pub const Reader = struct {
             } else return self.fail(error.InvalidSyntax, "unknown pseudo-attribute in the XML declaration");
         }
         const v = version orelse return self.fail(error.InvalidSyntax, "the XML declaration needs a version");
-        if (!std.mem.eql(u8, v, "1.0")) return self.fail(error.UnsupportedVersion, "only XML 1.0 is supported");
+        // VersionNum is `1.` and digits (production 26, fifth edition). 1.1 has different rules
+        // (line ends, name characters) that are not implemented, so it is refused rather than misread.
+        if (v.len < 3 or !std.mem.startsWith(u8, v, "1.")) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
+        for (v[2..]) |d| if (!std.ascii.isDigit(d)) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
+        if (std.mem.eql(u8, v, "1.1")) return self.fail(error.UnsupportedVersion, "XML 1.1 is not supported");
         if (encoding) |enc| {
             if (!std.ascii.eqlIgnoreCase(enc, "utf-8") and !std.ascii.eqlIgnoreCase(enc, "us-ascii"))
                 return self.fail(error.UnsupportedEncoding, "only UTF-8 and US-ASCII documents are supported");
@@ -485,6 +494,7 @@ pub const Reader = struct {
         while (!chars.isSpace(c) and c != '?') : (c = try self.mustTake()) try self.append(&self.buf, c);
         const target_len = self.buf.items.len;
         if (!chars.isName(self.buf.items)) return self.fail(error.InvalidName, "bad processing instruction target");
+        if (self.options.namespaces and std.mem.indexOfScalar(u8, self.buf.items, ':') != null) return self.fail(error.InvalidName, "a processing instruction target cannot contain a colon");
         const is_decl_target = std.mem.eql(u8, self.buf.items, "xml");
         if (std.ascii.eqlIgnoreCase(self.buf.items, "xml") and !(is_decl_target and self.first_token and chars.isSpace(c)))
             return self.fail(error.InvalidSyntax, "an XML declaration is only allowed at the very start");
@@ -596,6 +606,13 @@ pub const Reader = struct {
         return .{ .off = start, .len = @intCast(tmp.items.len) };
     }
 
+    /// A QName has at most one colon, with something on both sides (Namespaces production 7-10).
+    fn validQName(q: []const u8) bool {
+        const c = std.mem.indexOfScalar(u8, q, ':') orelse return true;
+        if (c == 0 or c == q.len - 1) return false;
+        return std.mem.indexOfScalarPos(u8, q, c + 1, ':') == null;
+    }
+
     fn splitName(q: []const u8) struct { prefix: []const u8, local: []const u8 } {
         if (std.mem.indexOfScalar(u8, q, ':')) |i| return .{ .prefix = q[0..i], .local = q[i + 1 ..] };
         return .{ .prefix = "", .local = q };
@@ -640,6 +657,12 @@ pub const Reader = struct {
             had_space = false;
         }
         const tag = self.tag_buf.items;
+        if (self.options.namespaces) {
+            if (!validQName(tag[elem.off..][0..elem.len])) return self.fail(error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+            for (self.raw_attrs.items) |ra| {
+                if (!validQName(tag[ra.name.off..][0..ra.name.len])) return self.fail(error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+            }
+        }
 
         // Push the element name (needed to match its end tag).
         const ename = tag[elem.off..][0..elem.len];
@@ -657,6 +680,10 @@ pub const Reader = struct {
             const uri = tag[ra.value.off..][0..ra.value.len];
             if (!is_default and (pfx.len == 0 or std.mem.eql(u8, pfx, "xmlns"))) return self.fail(error.InvalidName, "bad namespace declaration");
             if (!is_default and uri.len == 0) return self.fail(error.InvalidSyntax, "a prefix cannot be bound to an empty namespace");
+            // The `xml` prefix only to its own namespace, and no other prefix to it or to the xmlns namespace.
+            if (std.mem.eql(u8, pfx, "xml") and !std.mem.eql(u8, uri, xml_namespace)) return self.fail(error.InvalidSyntax, "the xml prefix can only be bound to the XML namespace");
+            if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.fail(error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
+            if (std.mem.eql(u8, uri, xmlns_namespace)) return self.fail(error.InvalidSyntax, "the xmlns namespace cannot be bound");
             const po: u32 = @intCast(self.ns_bytes.items.len);
             try self.ns_bytes.appendSlice(self.gpa, pfx);
             const uo: u32 = @intCast(self.ns_bytes.items.len);

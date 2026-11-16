@@ -51,6 +51,8 @@ const valid = [_][]const u8{
     "<a b=\"'\"/>",
     "<a>\n\n</a>\n\n",
     "  \n<a/>  \n",
+    "<?xml\tversion='1.0'\n\tencoding='UTF-8'?><a/>",
+    "<?xml version='1.7'?><a/>", // legal in the fifth edition
 };
 
 const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
@@ -90,7 +92,9 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<a><?xml version='1.0'?></a>", .err = error.InvalidSyntax }, // declaration not at the start
     .{ .src = " <?xml version='1.0'?><a/>", .err = error.InvalidSyntax },
     .{ .src = "<?xml?><a/>", .err = error.InvalidSyntax },
-    .{ .src = "<?xml version='2.0'?><a/>", .err = error.UnsupportedVersion },
+    .{ .src = "<?xml version='2.0'?><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<?xml version='1.1'?><a/>", .err = error.UnsupportedVersion },
+    .{ .src = "<?xml version='1.'?><a/>", .err = error.InvalidSyntax },
     .{ .src = "<?xml version='1.0' encoding='latin-1'?><a/>", .err = error.UnsupportedEncoding },
     .{ .src = "<?xml encoding='utf-8' version='1.0'?><a/>", .err = error.InvalidSyntax },
     .{ .src = "<?xml version='1.0' standalone='maybe'?><a/>", .err = error.InvalidSyntax },
@@ -109,6 +113,16 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<a xmlns:p='urn:x' xmlns:q='urn:x' p:b='1' q:b='2'/>", .err = error.DuplicateAttribute },
     .{ .src = "<a xmlns:p=''/>", .err = error.InvalidSyntax },
     .{ .src = "<a xmlns:xmlns='urn:x'/>", .err = error.InvalidName },
+    // Found by the W3C suite.
+    .{ .src = "<?xml version=\"1.0\"encoding=\"UTF-8\"?><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<?xml version=\"1.0\"standalone=\"yes\"?><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<:foo/>", .err = error.InvalidName },
+    .{ .src = "<foo:/>", .err = error.InvalidName },
+    .{ .src = "<a:b:c xmlns:a='urn:x' xmlns:b='urn:y'/>", .err = error.InvalidName },
+    .{ .src = "<a xmlns:xml='urn:other'/>", .err = error.InvalidSyntax },
+    .{ .src = "<a xmlns:yml='http://www.w3.org/XML/1998/namespace'/>", .err = error.InvalidSyntax },
+    .{ .src = "<a xmlns:y='http://www.w3.org/2000/xmlns/'/>", .err = error.InvalidSyntax },
+    .{ .src = "<?a:b data?><foo/>", .err = error.InvalidName },
 };
 
 test "well-formed documents are accepted" {
