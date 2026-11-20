@@ -1,17 +1,17 @@
-% XML-ZIG(3) Version 0.1.0 | xml-zig Manual
-% Dakota James Owen Keeler
-% 2026-11-16
+# NAME
 
-NAME
 xml-zig - XML 1.0 parser and writer for Zig
 
-SYNOPSIS
-const xml = @import("xml");
+# SYNOPSIS
 
-DESCRIPTION
+    const xml = @import("xml");
+
+# DESCRIPTION
+
 A streaming XML parser built on `std.Io`, a small tree (`Document`) built on top of it, and a writer. No dependencies. See `docs/api.md` for worked examples and `ai/SPEC.md` for the requirements and known deviations.
 
-READER
+# READER
+
 `Reader.init(gpa, *std.Io.Reader, Options, ?*Diagnostic)`, `Reader.next() !Event`, `Reader.deinit()`, `Reader.depth()`.
 
 Events: `xml_decl` (version, encoding, standalone), `start_element` (name, attributes, empty), `end_element` (name), `text`, `cdata`, `comment`, `processing_instruction` (target, data), `doctype`, `end_of_document`. Strings are borrowed until the next call to `next`.
@@ -20,14 +20,19 @@ Options: `entities` (extra `&name;` replacements supplied by the caller), `names
 
 Errors: `InvalidSyntax`, `InvalidName`, `InvalidCharacter`, `UnexpectedEof`, `MismatchedTag`, `DuplicateAttribute`, `UndefinedEntity`, `InvalidCharacterReference`, `UnboundPrefix`, `UnsupportedEncoding` (anything but UTF-8, US-ASCII, UTF-16, ISO-8859-1), `UnsupportedVersion` (1.1), `DoctypeNotAllowed`, `LimitExceeded`, `ReadFailed`, `OutOfMemory`. `Diagnostic` holds `line`, `column` and `message`.
 
-DOCUMENT
+# DOCUMENT
+
 `Document.parse(gpa, bytes, Options, ?*Diagnostic)`, `Document.parseReader(gpa, *std.Io.Reader, ...)`, `Document.write(gpa, *std.Io.Writer, WriteOptions)` (writes the tree back with its comments, processing instructions, CDATA, DOCTYPE and declaration), `Document.deinit()`. `Document.prolog` and `Document.epilog` hold what is outside the root; `Document.declaration` is the XML declaration. Options: `keep_comments` (true), `trim_blank_text`, `reader`. `Document.root` is an `*Element` with `name`, `attributes`, `children` and the methods `attr`, `attrNs`, `child`, `childNs`, `elements`, `appendText`, `textContent`.
 
-WRITER
+# WRITER
+
 `Writer.init(gpa, *std.Io.Writer, Options)`; `declaration`, `declarationWith`, `processingInstruction`, `doctype`, `lineBreak`, `start`, `attribute`, `text`, `cdata`, `comment`, `end`, `endExpanded`, `finish`, `deinit`. `Options.indent` is spaces per level (0 = none).
 
-CONFORMING TO
+# CONFORMING TO
+
 XML 1.0 (Fifth Edition) and Namespaces in XML 1.0 (Third Edition), with the deviations listed in `ai/SPEC.md`.
 
-SEE ALSO
+# SEE ALSO
+
 xml-parse(1)
+
