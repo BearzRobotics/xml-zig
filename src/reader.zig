@@ -90,6 +90,10 @@ pub const Options = struct {
     /// Largest single text run, attribute value, comment, CDATA section,
     /// processing instruction or DOCTYPE, in bytes.
     max_token_bytes: u32 = 16 * 1024 * 1024,
+    /// Most bytes of names and attribute values held for one start tag.
+    max_tag_bytes: u32 = 32 * 1024 * 1024,
+    /// Most bytes of namespace prefixes and URIs in scope at once.
+    max_namespace_bytes: u32 = 1024 * 1024,
     /// Total input accepted, in bytes as read from the source, before any decoding (0 = unlimited).
     max_input_bytes: u64 = 0,
 };
@@ -770,6 +774,7 @@ pub const Reader = struct {
         while (true) {
             if (chars.isSpace(c) or c == '/' or c == '>' or c == '=') break;
             if (self.tag_buf.items.len - start >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
+            try self.roomInTag(1);
             try self.tag_buf.append(self.gpa, c);
             c = (try self.peekByte()) orelse break;
             if (chars.isSpace(c) or c == '/' or c == '>' or c == '=') break;
@@ -778,6 +783,11 @@ pub const Reader = struct {
         const len: u32 = @intCast(self.tag_buf.items.len - start);
         if (!chars.isName(self.tag_buf.items[start..])) return self.fail(error.InvalidName, "not a valid XML name");
         return .{ .off = start, .len = len };
+    }
+
+    /// Keeps `tag_buf` within its limit (which also keeps the 32-bit spans into it valid).
+    fn roomInTag(self: *Reader, more: usize) Error!void {
+        if (more > self.options.max_tag_bytes - self.tag_buf.items.len) return self.fail(error.LimitExceeded, "a start tag is longer than the configured limit");
     }
 
     fn readAttrValue(self: *Reader) Error!Span {
@@ -797,6 +807,7 @@ pub const Reader = struct {
             }
         }
         if (!chars.validText(tmp.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
+        try self.roomInTag(tmp.items.len);
         try self.tag_buf.appendSlice(self.gpa, tmp.items);
         return .{ .off = start, .len = @intCast(tmp.items.len) };
     }
@@ -885,6 +896,7 @@ pub const Reader = struct {
             if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.fail(error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
             if (std.mem.eql(u8, uri, xmlns_namespace)) return self.fail(error.InvalidSyntax, "the xmlns namespace cannot be bound");
             if (self.ns_binds.items.len >= self.options.max_namespace_bindings) return self.fail(error.LimitExceeded, "more namespace declarations in scope than the configured limit");
+            if (pfx.len + uri.len > self.options.max_namespace_bytes - self.ns_bytes.items.len) return self.fail(error.LimitExceeded, "the namespace names in scope are longer than the configured limit");
             const po: u32 = @intCast(self.ns_bytes.items.len);
             try self.ns_bytes.appendSlice(self.gpa, pfx);
             const uo: u32 = @intCast(self.ns_bytes.items.len);

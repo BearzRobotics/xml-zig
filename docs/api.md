@@ -56,7 +56,7 @@ const result = xml.Document.parse(gpa, "<a>\n  <b>\n</a>", .{}, &diag);
 
 ## Limits for untrusted input
 
-`Options` bounds `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_namespace_bindings` (512), `max_token_bytes` (16 MiB) and `max_input_bytes` (unlimited). Set `doctype = .reject` for formats that never have a DOCTYPE. Declared entities are never expanded.
+`Options` bounds `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_namespace_bindings` (512), `max_token_bytes` (16 MiB), `max_tag_bytes` (32 MiB), `max_namespace_bytes` (1 MiB) and `max_input_bytes` (unlimited). Set `doctype = .reject` for formats that never have a DOCTYPE. Declared entities are never expanded.
 
 ## Write
 

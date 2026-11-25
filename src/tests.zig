@@ -245,6 +245,14 @@ test "limits" {
     try drain("<a xmlns:p='u'><b xmlns:q='v'/><c xmlns:r='w'/></a>", two);
     try testing.expectError(error.LimitExceeded, drain("<a xmlns:p='u'><b xmlns:q='v'><c xmlns='w'/></b></a>", two));
     try drain("<a xmlns:p='u' xmlns:q='v' xmlns:r='w'/>", .{ .max_namespace_bindings = 2, .namespaces = false });
+    // All the attributes of a tag together, not only each one.
+    try drain("<a x='1234' y='5678'/>", .{ .max_tag_bytes = 11 });
+    try testing.expectError(error.LimitExceeded, drain("<a x='1234' y='5678'/>", .{ .max_tag_bytes = 10 }));
+    try testing.expectError(error.LimitExceeded, drain("<abcdefgh/>", .{ .max_tag_bytes = 7 }));
+    // And all the namespace names of the open elements together ("p" + "1234" twice).
+    const nested = "<a xmlns:p='1234'><b xmlns:q='5678'/><c xmlns:r='9012'/></a>";
+    try drain(nested, .{ .max_namespace_bytes = 10 });
+    try testing.expectError(error.LimitExceeded, drain(nested, .{ .max_namespace_bytes = 9 }));
     // Deeply nested input is refused, not a stack overflow.
     var deep: std.ArrayList(u8) = .empty;
     defer deep.deinit(testing.allocator);
