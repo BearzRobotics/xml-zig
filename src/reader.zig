@@ -15,6 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const chars = @import("chars.zig");
+const doctype = @import("doctype.zig");
 
 pub const xml_namespace = "http://www.w3.org/XML/1998/namespace";
 pub const xmlns_namespace = "http://www.w3.org/2000/xmlns/";
@@ -716,6 +717,7 @@ pub const Reader = struct {
         // `<!D` was taken. The declaration may hold an internal subset in
         // brackets, with quoted strings and comments that can hide `>`.
         try self.expect("OCTYPE");
+        if (!chars.isSpace(try self.mustTake())) return self.fail(error.InvalidSyntax, "whitespace is needed after <!DOCTYPE");
         self.buf.clearRetainingCapacity();
         var bracket_depth: u32 = 0;
         var quote: u8 = 0;
@@ -751,6 +753,7 @@ pub const Reader = struct {
             try self.append(&self.buf, b);
         }
         if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
+        if (doctype.check(self.buf.items)) |fault| return self.fail(error.InvalidSyntax, fault.message);
         self.doctype_seen = true;
         return .{ .doctype = std.mem.trim(u8, self.buf.items, " \t\n") };
     }

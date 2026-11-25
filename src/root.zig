@@ -38,6 +38,7 @@ pub const xmlns_namespace = reader.xmlns_namespace;
 test {
     _ = reader;
     _ = chars;
+    _ = @import("doctype.zig");
     _ = dom;
     _ = writer;
     _ = @import("tests.zig");

@@ -62,6 +62,7 @@ const valid = [_][]const u8{
     // A processing instruction may hold what would otherwise end the subset or open a string.
     "<!DOCTYPE a [ <?pi ] > \" ' ?> ]><a/>",
     "<!DOCTYPE a [ <?p?> <!ENTITY e '] >'> ]><a/>",
+    "<!DOCTYPE\na\nPUBLIC '-//x//EN' 'a.dtd' [\n]\n><a/>",
 };
 
 const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
@@ -148,6 +149,14 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<?xml version='1.0' encoding='US-ASCII'?><a>\xC3\xA9</a>", .err = error.InvalidCharacter },
     .{ .src = "<?xml version='1.0' encoding='us-ascii'?><a b='\xC3\xA9'/>", .err = error.InvalidCharacter },
     .{ .src = "<?xml version='1.0' encoding='us-ascii'?><\xC3\xA9/>", .err = error.InvalidCharacter },
+    // The declaration itself is checked, though nothing in its internal subset is interpreted.
+    .{ .src = "<!DOCTYPEa><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE ><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE a [ ] junk ><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE a -- a comment -- []><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE SYSTEM \"x.dtd\"><a/>", .err = error.InvalidSyntax },
+    .{ .src = "<!DOCTYPE a [ <!-- a -- b --> ]><a/>", .err = error.InvalidSyntax },
 };
 
 test "well-formed documents are accepted" {
