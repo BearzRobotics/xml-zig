@@ -43,7 +43,7 @@ defer doc.deinit();
 try doc.write(gpa, &out, .{});   // comments, processing instructions, CDATA, DOCTYPE and the declaration survive
 ```
 
-What is normalized: quote style and spaces inside tags, how a character was written (`&#65;` comes back as `A`), and `<a></a>` versus `<a/>` is kept. Whitespace between elements is kept as text unless `trim_blank_text` was set; `WriteOptions.indent` re-indents elements that hold no text. A document already in the writer's own style comes back byte for byte.
+What is normalized: quote style and spaces inside tags, how a character was written (`&#65;` comes back as `A`), and `<a></a>` versus `<a/>` is kept. Whitespace between elements is kept as text unless `trim_blank_text` was set; `WriteOptions.indent` re-indents elements that hold no text, leaving elements with text, and everything inside them, as they are. A document already in the writer's own style comes back byte for byte.
 
 ## Errors
 
@@ -72,4 +72,4 @@ try w.end();
 try w.finish();
 ```
 
-The writer escapes everything, rejects invalid names and characters, undeclared prefixes and repeated attributes (`.namespaces = false` turns the namespace checks off, for example to write a fragment), and indents only around elements that hold no text.
+The writer escapes everything, rejects invalid names and characters, undeclared prefixes and repeated attributes (`.namespaces = false` turns the namespace checks off, for example to write a fragment), and indents only around elements that hold no text. With an indent, call `mixedContent()` right after `start` and the attributes for an element whose text will follow a child element or comment; otherwise that later `text` is `error.InvalidState` rather than silently altered.

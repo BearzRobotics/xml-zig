@@ -27,8 +27,10 @@ pub const Error = error{
 };
 
 pub const Options = struct {
-    /// Spaces per level; 0 writes everything on one line. Indenting is only
-    /// applied around elements that hold no text, so text content is never altered.
+    /// Spaces per level; 0 writes everything on one line. Whitespace is only added inside
+    /// elements that hold no text, nor sit inside one that does, so text content is never altered.
+    /// Because the writer cannot see ahead, an element whose text comes after a child element,
+    /// comment or processing instruction must be declared with `mixedContent` first.
     indent: u8 = 0,
     /// Hold names to Namespaces in XML, so that a reader with the same setting accepts the output:
     /// qualified names, legal `xmlns` declarations, and a declaration in scope for every prefix.
@@ -44,8 +46,8 @@ pub const Writer = struct {
     /// Names of the open elements, back to back, with their lengths.
     names: std.ArrayList(u8) = .empty,
     lens: std.ArrayList(u32) = .empty,
-    /// Whether each open element has had element children and no text (so it may be indented).
-    only_elements: std.ArrayList(bool) = .empty,
+    /// For each open element, what may be, and has been, indented.
+    layout: std.ArrayList(Layout) = .empty,
     /// The names of the attributes in the open start tag, back to back, with their lengths.
     attr_names: std.ArrayList(u8) = .empty,
     attr_lens: std.ArrayList(u32) = .empty,
@@ -60,6 +62,13 @@ pub const Writer = struct {
     wrote_doctype: bool = false,
     /// Anything at all has been written: too late for an XML declaration.
     wrote_any: bool = false,
+
+    const Layout = struct {
+        /// It holds text, or is inside an element that does: no whitespace may be added in it.
+        mixed: bool = false,
+        /// Whitespace has been added before one of its children.
+        indented: bool = false,
+    };
 
     const Binding = struct { at: u32, prefix_len: u32, uri_len: u32 };
     const NsMark = struct { binds: usize, bytes: usize };
@@ -76,7 +85,7 @@ pub const Writer = struct {
     pub fn deinit(self: *Writer) void {
         self.names.deinit(self.gpa);
         self.lens.deinit(self.gpa);
-        self.only_elements.deinit(self.gpa);
+        self.layout.deinit(self.gpa);
         self.attr_names.deinit(self.gpa);
         self.attr_lens.deinit(self.gpa);
         self.ns_bytes.deinit(self.gpa);
@@ -136,10 +145,25 @@ pub const Writer = struct {
         self.out.writeAll("?>") catch |e| return werr(e);
     }
 
-    /// Starts a comment or processing instruction on its own line when it sits among elements only.
+    /// Starts a child element, comment or processing instruction on its own line, when the
+    /// element it is in may be indented.
     fn indentMarkup(self: *Writer) Error!void {
         const depth = self.lens.items.len;
-        if (depth > 0 and self.only_elements.items[depth - 1]) try self.newline(depth);
+        if (depth == 0 or self.options.indent == 0) return;
+        const parent = &self.layout.items[depth - 1];
+        if (parent.mixed) return;
+        parent.indented = true;
+        try self.newline(depth);
+    }
+
+    /// Declares that the innermost element holds text as well as markup, so that nothing is
+    /// indented inside it or its descendants. Needed only with an indent, and only before its
+    /// first child element, comment or processing instruction; `InvalidState` after that.
+    pub fn mixedContent(self: *Writer) Error!void {
+        if (self.lens.items.len == 0) return error.InvalidState;
+        const top = &self.layout.items[self.layout.items.len - 1];
+        if (top.indented) return error.InvalidState;
+        top.mixed = true;
     }
 
     /// A DOCTYPE, written as read (`raw` is the text between `<!DOCTYPE` and `>`). Only before the root.
@@ -224,16 +248,17 @@ pub const Writer = struct {
         // Make room first: once `<name` is written the stacks must record it, whatever fails.
         try self.names.ensureUnusedCapacity(self.gpa, name.len);
         try self.lens.ensureUnusedCapacity(self.gpa, 1);
-        try self.only_elements.ensureUnusedCapacity(self.gpa, 1);
+        try self.layout.ensureUnusedCapacity(self.gpa, 1);
         try self.ns_marks.ensureUnusedCapacity(self.gpa, 1);
         try self.closeTag();
+        try self.indentMarkup();
         const depth = self.lens.items.len;
-        if (depth > 0 and self.only_elements.items[depth - 1]) try self.newline(depth);
+        const inherited = depth > 0 and self.layout.items[depth - 1].mixed;
         self.out.writeByte('<') catch |e| return werr(e);
         self.out.writeAll(name) catch |e| return werr(e);
         self.names.appendSliceAssumeCapacity(name);
         self.lens.appendAssumeCapacity(@intCast(name.len));
-        self.only_elements.appendAssumeCapacity(true);
+        self.layout.appendAssumeCapacity(.{ .mixed = inherited });
         self.ns_marks.appendAssumeCapacity(.{ .binds = self.ns_binds.items.len, .bytes = self.ns_bytes.items.len });
         self.in_tag = true;
         self.wrote_any = true;
@@ -278,6 +303,8 @@ pub const Writer = struct {
         self.out.writeAll("=\"") catch |e| return werr(e);
         try self.escape(value, true);
         self.out.writeByte('"') catch |e| return werr(e);
+        // XML 1.0 section 2.10: whitespace here is significant, so add none.
+        if (std.mem.eql(u8, name, "xml:space") and std.mem.eql(u8, value, "preserve")) try self.mixedContent();
     }
 
     fn escape(self: *Writer, s: []const u8, in_attribute: bool) Error!void {
@@ -306,8 +333,14 @@ pub const Writer = struct {
     pub fn text(self: *Writer, s: []const u8) Error!void {
         if (self.lens.items.len == 0) return error.InvalidState;
         if (!chars.validText(s)) return error.InvalidCharacter;
+        const top = &self.layout.items[self.layout.items.len - 1];
+        if (top.indented) {
+            if (s.len == 0) return;
+            // The whitespace already added would become part of this element's text.
+            return error.InvalidState;
+        }
         try self.closeTag();
-        self.only_elements.items[self.only_elements.items.len - 1] = false;
+        top.mixed = true;
         try self.escape(s, false);
     }
 
@@ -315,8 +348,10 @@ pub const Writer = struct {
         if (self.lens.items.len == 0) return error.InvalidState;
         if (!chars.validText(s)) return error.InvalidCharacter;
         if (std.mem.indexOf(u8, s, "]]>") != null or hasCr(s)) return error.InvalidContent;
+        const top = &self.layout.items[self.layout.items.len - 1];
+        if (top.indented) return error.InvalidState;
         try self.closeTag();
-        self.only_elements.items[self.only_elements.items.len - 1] = false;
+        top.mixed = true;
         self.out.writeAll("<![CDATA[") catch |e| return werr(e);
         self.out.writeAll(s) catch |e| return werr(e);
         self.out.writeAll("]]>") catch |e| return werr(e);
@@ -352,7 +387,7 @@ pub const Writer = struct {
             self.ns_binds.items.len = mark.binds;
             self.ns_bytes.items.len = mark.bytes;
         }
-        const only = self.only_elements.pop().?;
+        const layout = self.layout.pop().?;
         const name = self.names.items[self.names.items.len - len ..];
         defer self.names.items.len -= len;
         if (self.in_tag and !expand) {
@@ -360,7 +395,8 @@ pub const Writer = struct {
             self.in_tag = false;
         } else {
             try self.closeTag();
-            if (only) try self.newline(self.lens.items.len);
+            // Only after indented children: an empty element stays empty.
+            if (layout.indented) try self.newline(self.lens.items.len);
             self.out.writeAll("</") catch |e| return werr(e);
             self.out.writeAll(name) catch |e| return werr(e);
             self.out.writeAll(">") catch |e| return werr(e);
@@ -581,6 +617,79 @@ test "the prolog cannot be written out of order" {
 
 test "the writer survives any failed allocation" {
     try testing.checkAllAllocationFailures(testing.allocator, writeNested, .{});
+}
+
+test "indentation never adds to text content" {
+    // An element declared mixed is left alone, with everything inside it.
+    const mixed = try render(.{ .indent = 2 }, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("doc");
+            try w.start("p");
+            try w.mixedContent();
+            try w.start("b");
+            try w.start("i");
+            try w.end();
+            try w.end();
+            try w.text(" and ");
+            try w.comment("c");
+            try w.end();
+            try w.start("empty");
+            try w.endExpanded();
+        }
+    }.f);
+    defer testing.allocator.free(mixed);
+    try testing.expectEqualStrings("<doc>\n  <p><b><i/></b> and <!--c--></p>\n  <empty></empty>\n</doc>\n", mixed);
+    // Text first, then elements: nothing is added anywhere below either.
+    const text_first = try render(.{ .indent = 2 }, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("p");
+            try w.text("a ");
+            try w.start("b");
+            try w.start("i");
+        }
+    }.f);
+    defer testing.allocator.free(text_first);
+    try testing.expectEqualStrings("<p>a <b><i/></b></p>\n", text_first);
+    const preserved = try render(.{ .indent = 2 }, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("a");
+            try w.start("b");
+            try w.attribute("xml:space", "preserve");
+            try w.start("c");
+        }
+    }.f);
+    defer testing.allocator.free(preserved);
+    try testing.expectEqualStrings("<a>\n  <b xml:space=\"preserve\"><c/></b>\n</a>\n", preserved);
+
+    // Too late once whitespace is in: an error, not altered content.
+    for ([_]bool{ true, false }) |element_first| {
+        var aw: Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        var w = Writer.init(testing.allocator, &aw.writer, .{ .indent = 2 });
+        defer w.deinit();
+        try w.start("a");
+        if (element_first) {
+            try w.start("b");
+            try w.end();
+        } else try w.comment("c");
+        const before = aw.written().len;
+        try testing.expectError(error.InvalidState, w.text("x"));
+        try testing.expectError(error.InvalidState, w.cdata("x"));
+        try testing.expectError(error.InvalidState, w.mixedContent());
+        try testing.expectEqual(before, aw.written().len);
+        try w.text("");
+    }
+    // Without an indent there is nothing to declare.
+    const flat = try render(.{}, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("a");
+            try w.start("b");
+            try w.end();
+            try w.text("x");
+        }
+    }.f);
+    defer testing.allocator.free(flat);
+    try testing.expectEqualStrings("<a><b/>x</a>", flat);
 }
 
 test "misuse is an error, not bad output" {

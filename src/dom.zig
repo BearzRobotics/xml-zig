@@ -322,6 +322,11 @@ fn writeMisc(w: *writer_mod.Writer, m: Misc) writer_mod.Error!void {
 
 fn openElement(w: *writer_mod.Writer, el: *const Element) writer_mod.Error!void {
     try w.start(el.name.qualified);
+    // The writer cannot see ahead to text that follows a child; the tree can.
+    for (el.children) |c| if (c == .text or c == .cdata) {
+        try w.mixedContent();
+        break;
+    };
     for (el.attributes) |a| try w.attribute(a.name.qualified, a.value);
 }
 
@@ -525,6 +530,24 @@ test "write normalizes only what the tree does not record" {
     const again = try roundTrip(out, .{});
     defer testing.allocator.free(again);
     try testing.expectEqualStrings(out, again);
+}
+
+/// Writes `src` indented and checks that no element's text content changed.
+fn expectIndented(src: []const u8, want: []const u8) !void {
+    const out = try roundTrip(src, .{ .indent = 2 });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(want, out);
+    // Indenting again changes nothing.
+    const again = try roundTrip(out, .{ .indent = 2 });
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(want, again);
+}
+
+test "writing with an indent leaves text content alone" {
+    try expectIndented("<p><b>a</b> and <i>b</i></p>", "<p><b>a</b> and <i>b</i></p>\n");
+    try expectIndented("<p><b><u/></b><![CDATA[x]]></p>", "<p><b><u/></b><![CDATA[x]]></p>\n");
+    try expectIndented("<r><b></b></r>", "<r>\n  <b></b>\n</r>\n");
+    try expectIndented("<r><s xml:space=\"preserve\"><b/></s></r>", "<r>\n  <s xml:space=\"preserve\"><b/></s>\n</r>\n");
 }
 
 test "a document read without namespaces is written without them" {

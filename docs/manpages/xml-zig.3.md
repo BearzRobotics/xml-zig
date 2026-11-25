@@ -26,7 +26,7 @@ Errors: `InvalidSyntax`, `InvalidName`, `InvalidCharacter`, `UnexpectedEof`, `Mi
 
 # WRITER
 
-`Writer.init(gpa, *std.Io.Writer, Options)`; `declaration`, `declarationWith`, `processingInstruction`, `doctype`, `lineBreak`, `start`, `attribute`, `text`, `cdata`, `comment`, `end`, `endExpanded`, `finish`, `deinit`. `Options.indent` is spaces per level (0 = none). `Options.namespaces` (true) holds names and `xmlns` declarations to Namespaces in XML; set it to false to write without namespace processing.
+`Writer.init(gpa, *std.Io.Writer, Options)`; `declaration`, `declarationWith`, `processingInstruction`, `doctype`, `lineBreak`, `mixedContent`, `start`, `attribute`, `text`, `cdata`, `comment`, `end`, `endExpanded`, `finish`, `deinit`. `Options.indent` is spaces per level (0 = none). `Options.namespaces` (true) holds names and `xmlns` declarations to Namespaces in XML; set it to false to write without namespace processing.
 
 # CONFORMING TO
 
