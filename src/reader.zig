@@ -769,7 +769,10 @@ pub const Reader = struct {
     fn validQName(q: []const u8) bool {
         const c = std.mem.indexOfScalar(u8, q, ':') orelse return true;
         if (c == 0 or c == q.len - 1) return false;
-        return std.mem.indexOfScalarPos(u8, q, c + 1, ':') == null;
+        if (std.mem.indexOfScalarPos(u8, q, c + 1, ':') != null) return false;
+        // Both halves are NCNames. The whole is already a Name, so the prefix starts properly;
+        // the local part must too (`a:1b` is a Name but not a QName).
+        return chars.isName(q[c + 1 ..]);
     }
 
     fn splitName(q: []const u8) struct { prefix: []const u8, local: []const u8 } {

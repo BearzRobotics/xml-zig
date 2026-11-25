@@ -53,6 +53,8 @@ const valid = [_][]const u8{
     "  \n<a/>  \n",
     "<?xml\tversion='1.0'\n\tencoding='UTF-8'?><a/>",
     "<?xml version='1.7'?><a/>", // legal in the fifth edition
+    "<a:_1 xmlns:a='u'/>",
+    "<a:\xC3\xA9 xmlns:a='u'/>",
 };
 
 const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
@@ -131,6 +133,11 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     // Namespaces, "Reserved Prefixes and Namespace Names": W3C rmt-ns-e1.0-13c.
     .{ .src = "<xmlns:a/>", .err = error.InvalidName },
     .{ .src = "<!DOCTYPE foo [<!ELEMENT xmlns:foo EMPTY>]><xmlns:foo/>", .err = error.InvalidName },
+    .{ .src = "<a:1b xmlns:a='u'/>", .err = error.InvalidName },
+    .{ .src = "<a:-b xmlns:a='u'/>", .err = error.InvalidName },
+    .{ .src = "<a:.b xmlns:a='u'/>", .err = error.InvalidName },
+    .{ .src = "<a xmlns:1='u'/>", .err = error.InvalidName },
+    .{ .src = "<a xmlns:p='u' p:\xC2\xB7='1'/>", .err = error.InvalidName }, // U+00B7 cannot start a name
 };
 
 test "well-formed documents are accepted" {
