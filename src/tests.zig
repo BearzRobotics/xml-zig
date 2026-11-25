@@ -492,33 +492,87 @@ const sample =
     \\<![CDATA[raw]]><?pi data?><empty/>é日本</root>
 ;
 
+/// Everything the reader reports, every field of every event, one event to a line.
+fn transcript(gpa: std.mem.Allocator, src: *Io.Reader) ![]u8 {
+    var out: Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    var rd = xml.Reader.init(gpa, src, .{}, null);
+    defer rd.deinit();
+    while (true) {
+        const ev = try rd.next();
+        try w.print("{s} depth={d}", .{ @tagName(ev), rd.depth() });
+        switch (ev) {
+            .xml_decl => |d| try w.print(" [{s}] [{s}] {?}", .{ d.version, d.encoding orelse "-", d.standalone }),
+            .start_element => |e| {
+                try w.print(" empty={}", .{e.empty});
+                try printName(w, e.name);
+                for (e.attributes) |a| {
+                    try printName(w, a.name);
+                    try w.print("=[{s}]", .{a.value});
+                }
+            },
+            .end_element => |e| try printName(w, e.name),
+            .text, .cdata, .comment, .doctype => |t| try w.print(" [{s}]", .{t}),
+            .processing_instruction => |p| try w.print(" [{s}] [{s}]", .{ p.target, p.data }),
+            .end_of_document => {},
+        }
+        try w.writeByte('\n');
+        if (ev == .end_of_document) break;
+    }
+    return out.toOwnedSlice();
+}
+
+fn printName(w: *Io.Writer, n: xml.Name) !void {
+    try w.print(" [{s}|{s}|{s}|{s}]", .{ n.qualified, n.prefix, n.local, n.uri });
+}
+
+/// Something of everything, with the things that straddle buffers: multi-byte and supplementary
+/// characters, CR LF, references, and every kind of markup. No XML declaration, so that it can be
+/// re-encoded.
+const everything =
+    "<!DOCTYPE r [ <!-- > --> <!ENTITY e \"]>\"> ]>\r\n<!--before--><?pi one?>\r\n" ++
+    "<r xmlns='urn:d' xmlns:p='urn:p' a='1 &amp;\t&#x1F600;\r\n2'><p:b p:c='\u{e9}'>text\r\n\u{65e5}\u{672c} \u{1F600} &lt;&#65;]] ></p:b>\r" ++
+    "<![CDATA[]]<>\r\n]]><!----><?q?><empty/></r>\r\n<!--after-->";
+
+/// `src` read through a source that hands out `chunk` bytes at a time into a buffer of each size
+/// must give exactly the events it gives when it is all in memory.
+fn expectSameHoweverRead(src: []const u8, want: []const u8) !void {
+    for ([_]usize{ 0, 1, 2, 3, 5, 16 }) |size| {
+        for ([_]usize{ 1, 2, 3, 7, 64 }) |chunk| {
+            errdefer std.debug.print("buffer {d}, chunk {d}\n", .{ size, chunk });
+            var buf: [16]u8 = undefined;
+            var t = Trickle.init(buf[0..size], src, chunk, null);
+            const got = try transcript(testing.allocator, &t.interface);
+            defer testing.allocator.free(got);
+            try testing.expectEqualStrings(want, got);
+        }
+    }
+}
+
+fn transcriptOf(src: []const u8) ![]u8 {
+    var r: Io.Reader = .fixed(src);
+    return transcript(testing.allocator, &r);
+}
+
 test "the result does not depend on how the input arrives" {
-    var expected: std.ArrayList(u8) = .empty;
-    defer expected.deinit(testing.allocator);
-    {
-        var r: Io.Reader = .fixed(sample);
-        var rd = xml.Reader.init(testing.allocator, &r, .{}, null);
-        defer rd.deinit();
-        while (true) {
-            const ev = try rd.next();
-            try expected.print(testing.allocator, "{s};", .{@tagName(ev)});
-            if (ev == .end_of_document) break;
-        }
+    for ([_][]const u8{ sample, everything }) |src| {
+        const want = try transcriptOf(src);
+        defer testing.allocator.free(want);
+        try expectSameHoweverRead(src, want);
     }
-    for ([_]usize{ 1, 2, 3, 7, 64 }) |chunk| {
-        var buf: [16]u8 = undefined;
-        var t = Trickle.init(&buf, sample, chunk, null);
-        var got: std.ArrayList(u8) = .empty;
-        defer got.deinit(testing.allocator);
-        var rd = xml.Reader.init(testing.allocator, &t.interface, .{}, null);
-        defer rd.deinit();
-        while (true) {
-            const ev = try rd.next();
-            try got.print(testing.allocator, "{s};", .{@tagName(ev)});
-            if (ev == .end_of_document) break;
-        }
-        try testing.expectEqualStrings(expected.items, got.items);
-    }
+}
+
+test "the transcript the comparisons rest on records what was read" {
+    const got = try transcriptOf("<p:a xmlns:p='u' k='v'>t</p:a>");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(
+        \\start_element depth=1 empty=false [p:a|p|a|u] [xmlns:p|xmlns|p|http://www.w3.org/2000/xmlns/]=[u] [k||k|]=[v]
+        \\text depth=1 [t]
+        \\end_element depth=0 [p:a|p|a|u]
+        \\end_of_document depth=0
+        \\
+    , got);
 }
 
 test "a read that fails part-way is reported, never a partial success" {
@@ -528,12 +582,6 @@ test "a read that fails part-way is reported, never a partial success" {
         var t = Trickle.init(&buf, sample, 3, cut);
         try testing.expectError(error.ReadFailed, drainReader(&t.interface, .{}));
     }
-}
-
-test "a reader with a tiny buffer still works" {
-    var buf: [1]u8 = undefined;
-    var t = Trickle.init(&buf, sample, 1, null);
-    try drainReader(&t.interface, .{});
 }
 
 test "an unbuffered source works" {
@@ -661,16 +709,27 @@ test "ISO-8859-1 documents are converted to UTF-8" {
     try drain("<?xml version='1.0' encoding='latin1'?><caf\xE9/>", .{});
 }
 
-test "the one-byte-at-a-time reader gives the same result for every encoding" {
+test "every encoding gives the same events, however the bytes arrive" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const doc = try utf16(arena.allocator(), "<?xml version='1.0'?><a x='1'>\u{e9}\u{1F600}</a>", false, true);
-    var buf: [2]u8 = undefined;
-    var t = Trickle.init(&buf, doc, 1, null);
-    try drainReader(&t.interface, .{});
-    const latin = "<?xml version='1.0' encoding='latin1'?><a>\xE9</a>";
-    var t2 = Trickle.init(&buf, latin, 1, null);
-    try drainReader(&t2.interface, .{});
+    const a = arena.allocator();
+    const want = try transcriptOf(everything);
+    defer testing.allocator.free(want);
+    for ([_]bool{ true, false }) |big| {
+        for ([_]bool{ true, false }) |bom| {
+            // Without a mark, UTF-16 is recognised by its first character, which must be `<`.
+            const src = try utf16(a, everything, big, bom);
+            errdefer std.debug.print("UTF-16 big={} bom={}\n", .{ big, bom });
+            try expectSameHoweverRead(src, want);
+        }
+    }
+    try expectSameHoweverRead("\xEF\xBB\xBF" ++ everything, want);
+
+    const latin1 = "<?xml version='1.0' encoding='latin1'?><caf\xE9 \xFF='\xA3\r\n'>\xE9t\xE9</caf\xE9>";
+    const same_in_utf8 = try transcriptOf("<?xml version='1.0' encoding='latin1'?><caf\xE9 \xFF='\xA3\r\n'>\xE9t\xE9</caf\xE9>");
+    defer testing.allocator.free(same_in_utf8);
+    try testing.expect(std.mem.indexOf(u8, same_in_utf8, "[caf\u{e9}||caf\u{e9}|] [\u{ff}||\u{ff}|]=[\u{a3} ]\ntext depth=1 [\u{e9}t\u{e9}]") != null);
+    try expectSameHoweverRead(latin1, same_in_utf8);
 }
 
 test "caller-supplied entities" {
