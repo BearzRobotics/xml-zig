@@ -486,7 +486,8 @@ pub const Reader = struct {
         const is_latin1 = eql(enc, "iso-8859-1") or eql(enc, "iso_8859-1") or eql(enc, "latin1") or eql(enc, "latin-1") or eql(enc, "l1");
         switch (self.enc) {
             .utf16le, .utf16be => {
-                if (!is_utf16) return self.fail(error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
+                const wrong_order = if (self.enc == .utf16le) eql(enc, "utf-16be") else eql(enc, "utf-16le");
+                if (!is_utf16 or wrong_order) return self.fail(error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
             },
             .utf8 => {
                 if (eql(enc, "utf-8")) return;

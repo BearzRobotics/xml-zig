@@ -522,6 +522,13 @@ test "UTF-16 documents are read, with or without a byte order mark" {
     }
     // A declaration that says UTF-8 on a UTF-16 document is a conflict.
     try testing.expectError(error.UnsupportedEncoding, drain(try utf16(a, "<?xml version='1.0' encoding='UTF-8'?><a/>", true, true), .{}));
+    // The declared byte order must be the real one.
+    for ([_]bool{ true, false }) |big| {
+        const same = try utf16(a, if (big) "<?xml version='1.0' encoding='UTF-16BE'?><a/>" else "<?xml version='1.0' encoding='utf-16le'?><a/>", big, true);
+        try drain(same, .{});
+        const other = try utf16(a, if (big) "<?xml version='1.0' encoding='UTF-16LE'?><a/>" else "<?xml version='1.0' encoding='utf-16be'?><a/>", big, true);
+        try testing.expectError(error.UnsupportedEncoding, drain(other, .{}));
+    }
     // A lone surrogate is not a character.
     try testing.expectError(error.InvalidCharacter, drain("\xFE\xFF\x00<\x00a\x00>\xDC\x00\x00<\x00/\x00a\x00>", .{}));
     try testing.expectError(error.InvalidCharacter, drain("\xFE\xFF\x00<\x00a\x00>\xD8\x00\x00A\x00<\x00/\x00a\x00>", .{}));

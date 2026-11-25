@@ -36,6 +36,7 @@ try w.declaration(); try w.start("a"); try w.attribute("k", "v"); try w.text("t"
 
 ## Known deviations and limits
 
+- UTF-16 with neither a byte order mark nor an encoding declaration is read (it is recognised by its first bytes). XML 1.0 section 4.3.3 makes this a fatal error; accepting it is a deliberate leniency (XML-1).
 - Input encodings: UTF-8, US-ASCII, UTF-16 and ISO-8859-1. Any other (Shift_JIS, EUC-JP, UTF-32, windows-1252 and so on) is `error.UnsupportedEncoding`.
 - Only XML 1.0 (any `1.n` except `1.1` is read with 1.0 rules, as the fifth edition allows); a declaration of version 1.1 is `error.UnsupportedVersion`.
 - DTDs are not interpreted: no declared entities (use `Options.entities` to supply names yourself), no default attribute values, no attribute-type normalization (tokenized attributes are not trimmed), no validation. A document that depends on them is refused (undefined entity) or read without those effects.
