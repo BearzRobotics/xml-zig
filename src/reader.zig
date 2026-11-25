@@ -175,6 +175,8 @@ pub const Reader = struct {
     push: [2]u8 = undefined,
     push_len: u8 = 0,
     had_utf8_bom: bool = false,
+    /// The declaration said US-ASCII, so any later byte of 0x80 or more is an error.
+    ascii_only: bool = false,
     /// An end event owed for an empty element (`<a/>`).
     pending_end: bool = false,
     /// The name of the element that just ended, kept until the next call so the event can borrow it.
@@ -313,6 +315,7 @@ pub const Reader = struct {
     fn takeByte(self: *Reader) Error!?u8 {
         var b = (try self.peekByte()) orelse return null;
         self.tossByte();
+        if (self.ascii_only and b >= 0x80) return self.fail(error.InvalidCharacter, "a byte outside US-ASCII in a document that declares it");
         if (b == '\r') {
             if ((try self.peekByte()) == @as(u8, '\n')) self.tossByte();
             b = '\n';
@@ -486,7 +489,11 @@ pub const Reader = struct {
                 if (!is_utf16) return self.fail(error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
             },
             .utf8 => {
-                if (eql(enc, "utf-8") or eql(enc, "us-ascii")) return;
+                if (eql(enc, "utf-8")) return;
+                if (eql(enc, "us-ascii")) {
+                    self.ascii_only = true;
+                    return;
+                }
                 if (is_latin1 and !self.had_utf8_bom and self.pend_len == 0) {
                     self.enc = .latin1;
                     return;

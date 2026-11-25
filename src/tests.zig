@@ -55,6 +55,7 @@ const valid = [_][]const u8{
     "<?xml version='1.7'?><a/>", // legal in the fifth edition
     "<a:_1 xmlns:a='u'/>",
     "<a:\xC3\xA9 xmlns:a='u'/>",
+    "<?xml version='1.0' encoding='US-ASCII'?><a b='&#233;'>&#xE9;</a>",
 };
 
 const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
@@ -138,6 +139,9 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<a:.b xmlns:a='u'/>", .err = error.InvalidName },
     .{ .src = "<a xmlns:1='u'/>", .err = error.InvalidName },
     .{ .src = "<a xmlns:p='u' p:\xC2\xB7='1'/>", .err = error.InvalidName }, // U+00B7 cannot start a name
+    .{ .src = "<?xml version='1.0' encoding='US-ASCII'?><a>\xC3\xA9</a>", .err = error.InvalidCharacter },
+    .{ .src = "<?xml version='1.0' encoding='us-ascii'?><a b='\xC3\xA9'/>", .err = error.InvalidCharacter },
+    .{ .src = "<?xml version='1.0' encoding='us-ascii'?><\xC3\xA9/>", .err = error.InvalidCharacter },
 };
 
 test "well-formed documents are accepted" {
