@@ -595,29 +595,6 @@ test "an unbuffered source works" {
     try testing.expectError(error.ReadFailed, drainReader(&none, .{}));
 }
 
-test "random bytes never crash the parser" {
-    var prng = std.Random.DefaultPrng.init(0x584d4c);
-    const rand = prng.random();
-    const alphabet = "<>/=\"'&;!?-[]#xa b:\n\t\r\x00\xC3\xA9\xFF";
-    var buf: [96]u8 = undefined;
-    for (0..4000) |_| {
-        const n = rand.uintLessThan(usize, buf.len);
-        for (buf[0..n]) |*b| b.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
-        drain(buf[0..n], .{}) catch {};
-    }
-}
-
-test "mutated valid documents never crash the parser" {
-    var prng = std.Random.DefaultPrng.init(0x4d555441);
-    const rand = prng.random();
-    var buf: [sample.len]u8 = undefined;
-    for (0..4000) |_| {
-        @memcpy(&buf, sample);
-        for (0..1 + rand.uintLessThan(usize, 4)) |_| buf[rand.uintLessThan(usize, buf.len)] = rand.int(u8);
-        drain(&buf, .{}) catch {};
-    }
-}
-
 test "writer output reads back as the same tree" {
     var aw: Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();

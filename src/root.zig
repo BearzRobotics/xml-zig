@@ -42,5 +42,6 @@ test {
     _ = dom;
     _ = writer;
     _ = @import("tests.zig");
+    _ = @import("property_tests.zig");
     _ = @import("api_examples.zig");
 }

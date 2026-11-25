@@ -52,4 +52,4 @@ try w.declaration(); try w.start("a"); try w.attribute("k", "v"); try w.text("t"
 
 ## Testing
 
-`zig build test`: well-formed and not-well-formed cases by production, namespace scoping, limits, line ends and positions, short and failing reads, tiny buffers, random and mutated input, allocation-failure injection, writer round trips, and the examples in `docs/api.md`.
+`zig build test`: well-formed and not-well-formed cases by production, namespace scoping, limits, line ends and positions, short and failing reads, tiny buffers, generated, damaged and random input (every document accepted must write back as the same tree), allocation-failure injection, writer round trips, and the examples in `docs/api.md`.
