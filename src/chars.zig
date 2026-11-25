@@ -94,6 +94,39 @@ pub fn nameFault(s: []const u8) usize {
     return i;
 }
 
+pub const xml_namespace = "http://www.w3.org/XML/1998/namespace";
+pub const xmlns_namespace = "http://www.w3.org/2000/xmlns/";
+
+/// For a string already known to be a `Name`: is it also a QName? At most one colon, and an
+/// NCName on each side (Namespaces in XML 1.0, productions 7 to 10).
+pub fn isQName(q: []const u8) bool {
+    const c = std.mem.indexOfScalar(u8, q, ':') orelse return true;
+    if (c == 0 or c == q.len - 1) return false;
+    if (std.mem.indexOfScalarPos(u8, q, c + 1, ':') != null) return false;
+    // The whole is a Name, so the prefix starts properly; the local part must too
+    // (`a:1b` is a Name but not a QName).
+    return isName(q[c + 1 ..]);
+}
+
+pub const BindingFault = struct {
+    /// The declaring name is at fault, not the namespace given.
+    bad_name: bool = false,
+    message: []const u8,
+};
+
+/// The rules for a namespace declaration (Namespaces in XML 1.0, section 3): `xmlns="uri"` when
+/// `is_default`, else `xmlns:prefix="uri"`.
+pub fn bindingFault(is_default: bool, prefix: []const u8, uri: []const u8) ?BindingFault {
+    if (!is_default and (prefix.len == 0 or std.mem.eql(u8, prefix, "xmlns"))) return .{ .bad_name = true, .message = "bad namespace declaration" };
+    if (!is_default and uri.len == 0) return .{ .message = "a prefix cannot be bound to an empty namespace" };
+    // The `xml` prefix only to its own namespace, and no other prefix to it or to the xmlns namespace.
+    const is_xml = std.mem.eql(u8, prefix, "xml");
+    if (is_xml and !std.mem.eql(u8, uri, xml_namespace)) return .{ .message = "the xml prefix can only be bound to the XML namespace" };
+    if (!is_xml and std.mem.eql(u8, uri, xml_namespace)) return .{ .message = "the XML namespace can only be bound to the xml prefix" };
+    if (std.mem.eql(u8, uri, xmlns_namespace)) return .{ .message = "the xmlns namespace cannot be bound" };
+    return null;
+}
+
 const testing = std.testing;
 
 test "name characters" {

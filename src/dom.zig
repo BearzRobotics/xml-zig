@@ -155,6 +155,8 @@ pub const Document = struct {
     epilog: []const Misc = &.{},
     /// The declared `standalone` value, if any.
     standalone: ?bool = null,
+    /// Whether the document was read with namespace processing; `write` follows suit.
+    namespaces: bool = true,
 
     pub const ParseError = reader.Error;
 
@@ -282,6 +284,7 @@ pub const Document = struct {
             .prolog = prolog,
             .epilog = epilog,
             .standalone = standalone,
+            .namespaces = options.reader.namespaces,
         };
     }
 
@@ -297,7 +300,7 @@ pub const Document = struct {
     /// Quote style, entity spelling and whitespace inside tags are normalized; everything else
     /// round-trips: `write(parse(x))` parses back to the same tree.
     pub fn write(self: *const Document, gpa: Allocator, out: *Io.Writer, options: WriteOptions) writer_mod.Error!void {
-        var w = writer_mod.Writer.init(gpa, out, .{ .indent = options.indent });
+        var w = writer_mod.Writer.init(gpa, out, .{ .indent = options.indent, .namespaces = self.namespaces });
         defer w.deinit();
         if (options.declaration) if (self.declaration) |d| try w.declarationWith(d.version, d.encoding, d.standalone);
         for (self.prolog) |m| try writeMisc(&w, m);
@@ -522,6 +525,16 @@ test "write normalizes only what the tree does not record" {
     const again = try roundTrip(out, .{});
     defer testing.allocator.free(again);
     try testing.expectEqualStrings(out, again);
+}
+
+test "a document read without namespaces is written without them" {
+    const src = "<p:a q:b=\"1\"><x:y:z/></p:a>";
+    var doc = try Document.parse(testing.allocator, src, .{ .reader = .{ .namespaces = false } }, null);
+    defer doc.deinit();
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try doc.write(testing.allocator, &aw.writer, .{});
+    try testing.expectEqualStrings(src ++ "\n", aw.written());
 }
 
 test "write can leave the declaration out and indent" {

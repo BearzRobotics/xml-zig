@@ -17,8 +17,8 @@ const Io = std.Io;
 const chars = @import("chars.zig");
 const doctype = @import("doctype.zig");
 
-pub const xml_namespace = "http://www.w3.org/XML/1998/namespace";
-pub const xmlns_namespace = "http://www.w3.org/2000/xmlns/";
+pub const xml_namespace = chars.xml_namespace;
+pub const xmlns_namespace = chars.xmlns_namespace;
 
 pub const Error = error{
     /// The input is not well-formed XML; see the `Diagnostic` for where and why.
@@ -887,16 +887,6 @@ pub const Reader = struct {
         return .{ .off = start, .len = @intCast(tmp.items.len) };
     }
 
-    /// A QName has at most one colon, with something on both sides (Namespaces production 7-10).
-    fn validQName(q: []const u8) bool {
-        const c = std.mem.indexOfScalar(u8, q, ':') orelse return true;
-        if (c == 0 or c == q.len - 1) return false;
-        if (std.mem.indexOfScalarPos(u8, q, c + 1, ':') != null) return false;
-        // Both halves are NCNames. The whole is already a Name, so the prefix starts properly;
-        // the local part must too (`a:1b` is a Name but not a QName).
-        return chars.isName(q[c + 1 ..]);
-    }
-
     /// Splits a QName. Without namespace processing a colon is an ordinary name character, so the
     /// whole name is the local part.
     fn splitName(self: *const Reader, q: []const u8) struct { prefix: []const u8, local: []const u8 } {
@@ -946,9 +936,9 @@ pub const Reader = struct {
         }
         const tag = self.tag_buf.items;
         if (self.options.namespaces) {
-            if (!validQName(tag[elem.off..][0..elem.len])) return self.failAt(elem_at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+            if (!chars.isQName(tag[elem.off..][0..elem.len])) return self.failAt(elem_at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
             for (self.raw_attrs.items) |ra| {
-                if (!validQName(tag[ra.name.off..][0..ra.name.len])) return self.failAt(ra.at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+                if (!chars.isQName(tag[ra.name.off..][0..ra.name.len])) return self.failAt(ra.at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
             }
         }
 
@@ -966,12 +956,7 @@ pub const Reader = struct {
             if (!is_default and !std.mem.eql(u8, sp.prefix, "xmlns")) continue;
             const pfx: []const u8 = if (is_default) "" else sp.local;
             const uri = tag[ra.value.off..][0..ra.value.len];
-            if (!is_default and (pfx.len == 0 or std.mem.eql(u8, pfx, "xmlns"))) return self.failAt(ra.at, error.InvalidName, "bad namespace declaration");
-            if (!is_default and uri.len == 0) return self.failAt(ra.at, error.InvalidSyntax, "a prefix cannot be bound to an empty namespace");
-            // The `xml` prefix only to its own namespace, and no other prefix to it or to the xmlns namespace.
-            if (std.mem.eql(u8, pfx, "xml") and !std.mem.eql(u8, uri, xml_namespace)) return self.failAt(ra.at, error.InvalidSyntax, "the xml prefix can only be bound to the XML namespace");
-            if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.failAt(ra.at, error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
-            if (std.mem.eql(u8, uri, xmlns_namespace)) return self.failAt(ra.at, error.InvalidSyntax, "the xmlns namespace cannot be bound");
+            if (chars.bindingFault(is_default, pfx, uri)) |fault| return self.failAt(ra.at, if (fault.bad_name) error.InvalidName else error.InvalidSyntax, fault.message);
             if (self.ns_binds.items.len >= self.options.max_namespace_bindings) return self.failAt(ra.at, error.LimitExceeded, "more namespace declarations in scope than the configured limit");
             if (pfx.len + uri.len > self.options.max_namespace_bytes - self.ns_bytes.items.len) return self.failAt(ra.at, error.LimitExceeded, "the namespace names in scope are longer than the configured limit");
             const po: u32 = @intCast(self.ns_bytes.items.len);

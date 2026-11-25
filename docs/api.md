@@ -72,4 +72,4 @@ try w.end();
 try w.finish();
 ```
 
-The writer escapes everything, rejects invalid names and characters, and indents only around elements that hold no text.
+The writer escapes everything, rejects invalid names and characters, undeclared prefixes and repeated attributes (`.namespaces = false` turns the namespace checks off, for example to write a fragment), and indents only around elements that hold no text.
