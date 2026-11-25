@@ -221,12 +221,16 @@ pub const Document = struct {
                 .end_of_document => break,
             }
         }
+        // These allocate from `arena`, so they must happen before it is copied into the result;
+        // a node added after the copy would be recorded only in the local, and leak.
+        const prolog = try a.dupe(Misc, before.items);
+        const epilog = try a.dupe(Misc, after.items);
         return .{
             .arena = arena,
             .root = root.?,
             .declaration = declaration,
-            .prolog = try a.dupe(Misc, before.items),
-            .epilog = try a.dupe(Misc, after.items),
+            .prolog = prolog,
+            .epilog = epilog,
             .standalone = standalone,
         };
     }
@@ -386,16 +390,45 @@ test "write can leave the declaration out and indent" {
     try testing.expectEqualStrings("<a>\n  <!--c-->\n  <b>\n    <c/>\n  </b>\n</a>\n", out);
 }
 
-test "no leaks when allocation fails part-way" {
-    const src = "<?xml version=\"1.0\"?><a x='1'><b>text</b><c y='2'/><!--k--><d>more &amp; more</d></a>";
-    var fail_index: usize = 0;
-    while (fail_index < 200) : (fail_index += 1) {
-        var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        if (Document.parse(fa.allocator(), src, .{}, null)) |d| {
-            var doc = d;
-            doc.deinit();
-            break;
-        } else |e| try testing.expect(e == error.OutOfMemory);
+/// Big enough on every side of the root that the arena needs new nodes at each stage, including the
+/// last allocations `parseReader` makes.
+const oom_sample = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE a>" ++ "<!--before the root--><?p q?>" ++
+    "<a x='1' xmlns:n='urn:n'><b>text</b><n:c y='2'/><!--k--><![CDATA[z]]><?pi d?><d>more &amp; more</d></a>";
+
+fn parseAndDrop(gpa: Allocator, src: []const u8, options: Options) !void {
+    var doc = try Document.parse(gpa, src, options, null);
+    doc.deinit();
+}
+
+fn repeated(gpa: Allocator, before: usize, after: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (0..before) |_| try out.appendSlice(gpa, "<!--c-->");
+    try out.appendSlice(gpa, "<a/>");
+    for (0..after) |_| try out.appendSlice(gpa, "<?p d?>");
+    return out.toOwnedSlice(gpa);
+}
+
+test "no leaks however much is outside the root" {
+    // testing.allocator fails the test on any leak. Many sizes, so that some of them make the
+    // final prolog and epilog copies start a new arena node.
+    for (0..120) |n| {
+        const src = try repeated(testing.allocator, n, 0);
+        defer testing.allocator.free(src);
+        try parseAndDrop(testing.allocator, src, .{});
+        const tail = try repeated(testing.allocator, 0, n);
+        defer testing.allocator.free(tail);
+        try parseAndDrop(testing.allocator, tail, .{});
     }
-    try testing.expect(fail_index > 3);
+}
+
+test "no leaks when any allocation of a parse fails" {
+    const many = try repeated(testing.allocator, 40, 40);
+    defer testing.allocator.free(many);
+    for ([_][]const u8{ oom_sample, many }) |src| {
+        for ([_]Options{ .{}, .{ .keep_comments = false, .trim_blank_text = true } }) |options| {
+            // Fails every allocation in turn, and requires error.OutOfMemory without a leak.
+            try testing.checkAllAllocationFailures(testing.allocator, parseAndDrop, .{ src, options });
+        }
+    }
 }
