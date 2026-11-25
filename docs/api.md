@@ -32,7 +32,7 @@ const text = try p.textContent(gpa); // you own the result
 defer gpa.free(text);
 ```
 
-`Options` (for `Document`): `keep_comments` (default true: comments and processing instructions are kept, inside the root and in `doc.prolog` / `doc.epilog`; CDATA sections stay CDATA nodes), `trim_blank_text` (drop whitespace-only text), and `reader` for the reader's options.
+`Options` (for `Document`): `keep_comments` (default true: comments and processing instructions are kept, inside the root and in `doc.prolog` / `doc.epilog`; CDATA sections stay CDATA nodes), `trim_blank_text` (drop whitespace-only text, except under `xml:space="preserve"`; a run is judged whole, and whitespace written as `&#32;` counts as whitespace), and `reader` for the reader's options.
 
 ## Write a tree back, with its comments
 

@@ -122,7 +122,9 @@ pub const Options = struct {
     /// Keep comments and processing instructions, inside the root and around it, so that
     /// `Document.write` writes them back. Set to false to drop them.
     keep_comments: bool = true,
-    /// Drop text nodes that are only whitespace.
+    /// Drop text nodes that are only whitespace, except where `xml:space="preserve"` is in force.
+    /// A run is judged after its pieces are joined. Whitespace written as a reference (`&#32;`)
+    /// counts as whitespace like any other.
     trim_blank_text: bool = false,
 };
 
@@ -160,7 +162,7 @@ pub const Document = struct {
         defer rd.deinit();
 
         // One open element at a time: a stack of (element, children so far).
-        const Frame = struct { el: *Element, kids: std.ArrayList(Node) };
+        const Frame = struct { el: *Element, kids: std.ArrayList(Node), preserve_space: bool };
         var stack: std.ArrayList(Frame) = .empty;
         defer {
             for (stack.items) |*f| f.kids.deinit(gpa);
@@ -187,15 +189,26 @@ pub const Document = struct {
                 },
                 .doctype => |t| if (options.keep_comments) try before.append(gpa, .{ .doctype = try a.dupe(u8, t) }),
                 .start_element => |s| {
-                    if (stack.items.len > 0) try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
+                    var preserve_space = false;
+                    if (stack.items.len > 0) {
+                        const parent = &stack.items[stack.items.len - 1];
+                        try endRun(a, gpa, &run, &parent.kids, options.trim_blank_text and !parent.preserve_space);
+                        preserve_space = parent.preserve_space;
+                    }
+                    // `xml:space` is inherited until an element says otherwise (XML 1.0, 2.10).
+                    for (s.attributes) |at| if (std.mem.eql(u8, at.name.qualified, "xml:space")) {
+                        if (std.mem.eql(u8, at.value, "preserve")) preserve_space = true;
+                        if (std.mem.eql(u8, at.value, "default")) preserve_space = false;
+                    };
                     const el = try a.create(Element);
                     const attrs = try a.alloc(Attribute, s.attributes.len);
                     for (s.attributes, attrs) |src_attr, *dst| dst.* = .{ .name = try dupName(a, src_attr.name), .value = try a.dupe(u8, src_attr.value) };
                     el.* = .{ .name = try dupName(a, s.name), .attributes = attrs, .self_closing = s.empty };
-                    try stack.append(gpa, .{ .el = el, .kids = .empty });
+                    try stack.append(gpa, .{ .el = el, .kids = .empty, .preserve_space = preserve_space });
                 },
                 .end_element => {
-                    try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
+                    const top = &stack.items[stack.items.len - 1];
+                    try endRun(a, gpa, &run, &top.kids, options.trim_blank_text and !top.preserve_space);
                     var f = stack.pop().?;
                     defer f.kids.deinit(gpa);
                     f.el.children = try a.dupe(Node, f.kids.items);
@@ -207,24 +220,32 @@ pub const Document = struct {
                 },
                 .text => |t| {
                     if (stack.items.len == 0) continue;
-                    if (options.trim_blank_text and std.mem.trim(u8, t, " \t\n\r").len == 0) continue;
                     try run.appendSlice(gpa, t);
                 },
                 .cdata => |t| {
                     if (stack.items.len == 0) continue;
-                    try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
+                    {
+                        const top = &stack.items[stack.items.len - 1];
+                        try endRun(a, gpa, &run, &top.kids, options.trim_blank_text and !top.preserve_space);
+                    }
                     try stack.items[stack.items.len - 1].kids.append(gpa, .{ .cdata = try a.dupe(u8, t) });
                 },
                 .comment => |t| if (options.keep_comments) {
                     if (stack.items.len > 0) {
-                        try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
+                        {
+                            const top = &stack.items[stack.items.len - 1];
+                            try endRun(a, gpa, &run, &top.kids, options.trim_blank_text and !top.preserve_space);
+                        }
                         try stack.items[stack.items.len - 1].kids.append(gpa, .{ .comment = try a.dupe(u8, t) });
                     } else try (if (root == null) &before else &after).append(gpa, .{ .comment = try a.dupe(u8, t) });
                 },
                 .processing_instruction => |p| if (options.keep_comments) {
                     const pi: PiData = .{ .target = try a.dupe(u8, p.target), .data = try a.dupe(u8, p.data) };
                     if (stack.items.len > 0) {
-                        try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
+                        {
+                            const top = &stack.items[stack.items.len - 1];
+                            try endRun(a, gpa, &run, &top.kids, options.trim_blank_text and !top.preserve_space);
+                        }
                         try stack.items[stack.items.len - 1].kids.append(gpa, .{ .processing_instruction = pi });
                     } else try (if (root == null) &before else &after).append(gpa, .{ .processing_instruction = pi });
                 },
@@ -303,11 +324,11 @@ fn dupName(a: Allocator, n: Name) Allocator.Error!Name {
     };
 }
 
-/// Ends the text run, if there is one, as a single node of `kids`.
-fn endRun(a: Allocator, gpa: Allocator, run: *std.ArrayList(u8), kids: *std.ArrayList(Node), options: Options) Allocator.Error!void {
-    _ = options;
+/// Ends the text run, if there is one, as a single node of `kids`, or drops it if `trim` is set and
+/// the whole run is whitespace. (Judging pieces of a run would delete spaces between words.)
+fn endRun(a: Allocator, gpa: Allocator, run: *std.ArrayList(u8), kids: *std.ArrayList(Node), trim: bool) Allocator.Error!void {
     if (run.items.len == 0) return;
-    try kids.append(gpa, .{ .text = try a.dupe(u8, run.items) });
+    if (!trim or std.mem.trim(u8, run.items, " \t\n\r").len > 0) try kids.append(gpa, .{ .text = try a.dupe(u8, run.items) });
     run.clearRetainingCapacity();
 }
 
@@ -378,6 +399,39 @@ test "text split by dropped comments is one node, in memory proportional to the 
     try testing.expectEqual(@as(usize, pieces), doc.root.children[0].text.len);
     // Joining in the arena used hundreds of megabytes here.
     try testing.expect(doc.arena.queryCapacity() < 4 * src.items.len);
+}
+
+fn expectText(src: []const u8, options: Options, want: []const u8) !void {
+    var doc = try Document.parse(testing.allocator, src, options, null);
+    defer doc.deinit();
+    const got = try doc.root.textContent(testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "trim_blank_text drops only runs that are entirely blank" {
+    const trim: Options = .{ .trim_blank_text = true };
+    var doc = try Document.parse(testing.allocator, "<a>\n  <b/>\n  <c> x </c>\r\n</a>", trim, null);
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 2), doc.root.children.len);
+    try testing.expectEqualStrings(" x ", doc.root.children[1].element.children[0].text);
+    // Without the option the blank runs stay.
+    var kept = try Document.parse(testing.allocator, "<a>\n  <b/>\n</a>", .{}, null);
+    defer kept.deinit();
+    try testing.expectEqual(@as(usize, 3), kept.root.children.len);
+    // A dropped comment or processing instruction does not make a space between words blank.
+    try expectText("<a>Hello<!--c--> <!--d-->world</a>", .{ .trim_blank_text = true, .keep_comments = false }, "Hello world");
+    try expectText("<a> <?p?>x<?p?> </a>", .{ .trim_blank_text = true, .keep_comments = false }, " x ");
+    try expectText("<a> <!----> </a>", .{ .trim_blank_text = true, .keep_comments = false }, "");
+}
+
+test "trim_blank_text honours xml:space" {
+    const trim: Options = .{ .trim_blank_text = true };
+    try expectText("<p><t>Hello</t><t xml:space='preserve'> </t><t>world</t></p>", trim, "Hello world");
+    // Inherited, and turned off again by "default".
+    try expectText("<a xml:space='preserve'><b> </b><c xml:space='default'> <d> </d> </c> </a>", trim, "  ");
+    // Without namespace processing too.
+    try expectText("<a xml:space='preserve'> </a>", .{ .trim_blank_text = true, .reader = .{ .namespaces = false } }, " ");
 }
 
 test "write keeps comments, processing instructions, CDATA, DOCTYPE and the declaration" {
