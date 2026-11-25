@@ -84,11 +84,26 @@ pub const Element = struct {
 
     /// All text below this element, in document order, appended to `out`.
     pub fn appendText(self: *const Element, gpa: Allocator, out: *std.ArrayList(u8)) Allocator.Error!void {
-        for (self.children) |c| switch (c) {
-            .text, .cdata => |t| try out.appendSlice(gpa, t),
-            .element => |e| try e.appendText(gpa, out),
-            else => {},
-        };
+        // An explicit stack, not recursion: `max_depth` may be raised far beyond what the call stack holds.
+        var open: std.ArrayList([]const Node) = .empty;
+        defer open.deinit(gpa);
+        var rest = self.children;
+        while (true) {
+            if (rest.len == 0) {
+                rest = open.pop() orelse return;
+                continue;
+            }
+            const node = rest[0];
+            rest = rest[1..];
+            switch (node) {
+                .text, .cdata => |t| try out.appendSlice(gpa, t),
+                .element => |e| {
+                    try open.append(gpa, rest);
+                    rest = e.children;
+                },
+                else => {},
+            }
+        }
     }
 
     /// The concatenated text below this element; the caller frees it.
@@ -283,7 +298,7 @@ pub const Document = struct {
         defer w.deinit();
         if (options.declaration) if (self.declaration) |d| try w.declarationWith(d.version, d.encoding, d.standalone);
         for (self.prolog) |m| try writeMisc(&w, m);
-        try writeElement(&w, self.root);
+        try writeElement(gpa, &w, self.root);
         if (options.indent == 0) try w.lineBreak(); // with an indent the writer has already ended the line
         for (self.epilog) |m| try writeMisc(&w, m);
         try w.finish();
@@ -299,17 +314,39 @@ fn writeMisc(w: *writer_mod.Writer, m: Misc) writer_mod.Error!void {
     try w.lineBreak();
 }
 
-fn writeElement(w: *writer_mod.Writer, el: *const Element) writer_mod.Error!void {
+fn openElement(w: *writer_mod.Writer, el: *const Element) writer_mod.Error!void {
     try w.start(el.name.qualified);
     for (el.attributes) |a| try w.attribute(a.name.qualified, a.value);
-    for (el.children) |c| switch (c) {
-        .element => |e| try writeElement(w, e),
-        .text => |t| try w.text(t),
-        .cdata => |t| try w.cdata(t),
-        .comment => |t| try w.comment(t),
-        .processing_instruction => |p| try w.processingInstruction(p.target, p.data),
-    };
-    if (el.children.len == 0 and !el.self_closing) try w.endExpanded() else try w.end();
+}
+
+/// Writes `root` and everything below it. Iterative, like `appendText`.
+fn writeElement(gpa: Allocator, w: *writer_mod.Writer, root: *const Element) writer_mod.Error!void {
+    const Frame = struct { el: *const Element, next: usize = 0 };
+    var open: std.ArrayList(Frame) = .empty;
+    defer open.deinit(gpa);
+    try openElement(w, root);
+    try open.append(gpa, .{ .el = root });
+    while (open.items.len > 0) {
+        const frame = &open.items[open.items.len - 1];
+        const el = frame.el;
+        if (frame.next == el.children.len) {
+            if (el.children.len == 0 and !el.self_closing) try w.endExpanded() else try w.end();
+            _ = open.pop();
+            continue;
+        }
+        const node = el.children[frame.next];
+        frame.next += 1;
+        switch (node) {
+            .element => |e| {
+                try openElement(w, e);
+                try open.append(gpa, .{ .el = e }); // invalidates `frame`
+            },
+            .text => |t| try w.text(t),
+            .cdata => |t| try w.cdata(t),
+            .comment => |t| try w.comment(t),
+            .processing_instruction => |p| try w.processingInstruction(p.target, p.data),
+        }
+    }
 }
 
 const writer_mod = @import("writer.zig");
@@ -439,6 +476,24 @@ test "trim_blank_text honours xml:space" {
     try expectText("<a xml:space='preserve'><b> </b><c xml:space='default'> <d> </d> </c> </a>", trim, "  ");
     // Without namespace processing too.
     try expectText("<a xml:space='preserve'> </a>", .{ .trim_blank_text = true, .reader = .{ .namespaces = false } }, " ");
+}
+
+test "a very deep tree can be read and written without overflowing the call stack" {
+    const depth = 200_000;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    for (0..depth) |_| try src.appendSlice(testing.allocator, "<a>");
+    try src.appendSlice(testing.allocator, "x");
+    for (0..depth) |_| try src.appendSlice(testing.allocator, "</a>");
+    var doc = try Document.parse(testing.allocator, src.items, .{ .reader = .{ .max_depth = depth } }, null);
+    defer doc.deinit();
+    const text = try doc.root.textContent(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("x", text);
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try doc.write(testing.allocator, &aw.writer, .{});
+    try testing.expectEqualStrings(src.items, std.mem.trimEnd(u8, aw.written(), "\n"));
 }
 
 test "write keeps comments, processing instructions, CDATA, DOCTYPE and the declaration" {
