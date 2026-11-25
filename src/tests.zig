@@ -566,6 +566,16 @@ test "caller-supplied entities" {
     try testing.expectEqualStrings("ACME <&> Corp", (try rd.next()).start_element.attributes[0].value);
     try testing.expectError(error.UndefinedEntity, drain("<a>&other;</a>", .{ .entities = &entities }));
     try testing.expectError(error.UndefinedEntity, drain("<a>&nbsp;</a>", .{}));
+    // Any XML name, up to max_name_bytes.
+    const long: []const u8 = &@as([100]u8, @splat('n'));
+    const named = [_]xml.Entity{ .{ .name = "\u{e9}t\u{e9}", .value = "1" }, .{ .name = long, .value = "2" }, .{ .name = "1x", .value = "3" } };
+    var src_buf: [128]u8 = undefined;
+    const got = try firstText(try std.fmt.bufPrint(&src_buf, "<a>&\u{e9}t\u{e9};&{s};</a>", .{long}), .{ .entities = &named });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("12", got);
+    try testing.expectError(error.LimitExceeded, drain("<a>&abcdefgh;</a>", .{ .max_name_bytes = 4 }));
+    for ([_][]const u8{ "<a>&1x;</a>", "<a>& x;</a>", "<a>&;</a>", "<a>&\xFF;</a>", "<a>&a<b;</a>" }) |src|
+        try testing.expectError(error.UndefinedEntity, drain(src, .{ .entities = &named }));
     // The five predefined entities cannot be redefined.
     const redefined = [_]xml.Entity{ .{ .name = "lt", .value = "L" }, .{ .name = "gt", .value = "G" }, .{ .name = "amp", .value = "A" }, .{ .name = "quot", .value = "Q" }, .{ .name = "apos", .value = "P" } };
     const same = try firstText("<a>&lt;&gt;&amp;&quot;&apos;</a>", .{ .entities = &redefined });

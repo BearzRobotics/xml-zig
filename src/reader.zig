@@ -158,6 +158,8 @@ pub const Reader = struct {
     tag_buf: std.ArrayList(u8) = .empty,
     attrs: std.ArrayList(Attribute) = .empty,
     raw_attrs: std.ArrayList(struct { name: Span, value: Span }) = .empty,
+    /// The name in the entity reference being read.
+    ref_buf: std.ArrayList(u8) = .empty,
     /// Names of the open elements, back to back, with their lengths.
     names: std.ArrayList(u8) = .empty,
     name_lens: std.ArrayList(u32) = .empty,
@@ -198,6 +200,7 @@ pub const Reader = struct {
 
     pub fn deinit(self: *Reader) void {
         self.buf.deinit(self.gpa);
+        self.ref_buf.deinit(self.gpa);
         self.tag_buf.deinit(self.gpa);
         self.attrs.deinit(self.gpa);
         self.raw_attrs.deinit(self.gpa);
@@ -585,16 +588,17 @@ pub const Reader = struct {
             return;
         }
         // A name, then `;`.
-        var name: [64]u8 = undefined;
-        var n: usize = 0;
+        const bad = "a & that does not start a reference (write &amp;)";
+        self.ref_buf.clearRetainingCapacity();
         var c = first;
         while (c != ';') : (c = try self.mustTake()) {
-            if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.fail(error.UndefinedEntity, "a & that does not start a reference (write &amp;)");
-            if (n >= name.len) return self.fail(error.UndefinedEntity, "an entity name that is too long");
-            name[n] = c;
-            n += 1;
+            // Stop at once on ASCII that no name holds; other bytes are judged as UTF-8 below.
+            if (c < 0x80 and !(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.fail(error.UndefinedEntity, bad);
+            if (self.ref_buf.items.len >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
+            try self.ref_buf.append(self.gpa, c);
         }
-        const s = name[0..n];
+        const s = self.ref_buf.items;
+        if (!chars.isName(s)) return self.fail(error.UndefinedEntity, bad);
         // The predefined five come first: a caller's table must not change what `&lt;` means.
         const predefined = [_]Entity{ .{ .name = "lt", .value = "<" }, .{ .name = "gt", .value = ">" }, .{ .name = "amp", .value = "&" }, .{ .name = "quot", .value = "\"" }, .{ .name = "apos", .value = "'" } };
         for ([_][]const Entity{ &predefined, self.options.entities }) |table| {
