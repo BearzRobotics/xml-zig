@@ -856,6 +856,7 @@ pub const Reader = struct {
         const e_sp = splitName(ename);
         const e_uri: []const u8 = if (!self.options.namespaces) "" else blk: {
             if (e_sp.prefix.len == 0) break :blk self.lookupPrefix("") orelse "";
+            if (std.mem.eql(u8, e_sp.prefix, "xmlns")) return self.fail(error.InvalidName, "an element name cannot use the prefix xmlns");
             break :blk self.lookupPrefix(e_sp.prefix) orelse return self.fail(error.UnboundPrefix, "an element uses a namespace prefix that is not declared");
         };
         for (self.raw_attrs.items) |ra| {

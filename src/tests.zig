@@ -128,6 +128,9 @@ const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
     .{ .src = "<a xmlns:yml='http://www.w3.org/XML/1998/namespace'/>", .err = error.InvalidSyntax },
     .{ .src = "<a xmlns:y='http://www.w3.org/2000/xmlns/'/>", .err = error.InvalidSyntax },
     .{ .src = "<?a:b data?><foo/>", .err = error.InvalidName },
+    // Namespaces, "Reserved Prefixes and Namespace Names": W3C rmt-ns-e1.0-13c.
+    .{ .src = "<xmlns:a/>", .err = error.InvalidName },
+    .{ .src = "<!DOCTYPE foo [<!ELEMENT xmlns:foo EMPTY>]><xmlns:foo/>", .err = error.InvalidName },
 };
 
 test "well-formed documents are accepted" {
