@@ -45,7 +45,9 @@ pub const Error = error{
 };
 
 pub const Diagnostic = struct {
-    /// 1-based line; columns count bytes. 64 bits: a streamed document may put more than
+    /// 1-based line and column of the fault: the offending byte; for a bad character, name or
+    /// reference, where it starts; at the end of the input, just past the last byte. Columns
+    /// count bytes (of the UTF-8 form, for UTF-16 and ISO-8859-1 input). 64 bits: a streamed document may put more than
     /// 4 GiB on one line.
     line: u64 = 0,
     column: u64 = 0,
@@ -149,6 +151,23 @@ const Encoding = enum { utf8, utf16le, utf16be, latin1 };
 
 const Span = struct { off: u32, len: u32 };
 
+const Mark = struct {
+    line: u64,
+    col: u64,
+
+    /// The position of byte `offset` of `text`, which started here and has normalized line ends.
+    fn within(start: Mark, text: []const u8, offset: usize) Mark {
+        var m = start;
+        for (text[0..offset]) |b| {
+            if (b == '\n') {
+                m.line += 1;
+                m.col = 1;
+            } else m.col += 1;
+        }
+        return m;
+    }
+};
+
 pub const Reader = struct {
     gpa: Allocator,
     src: *Io.Reader,
@@ -159,13 +178,20 @@ pub const Reader = struct {
     line: u64 = 1,
     col: u64 = 1,
     consumed: u64 = 0,
+    /// Where the byte most recently taken is: usually the one at fault.
+    last: Mark = .{ .line = 1, .col = 1 },
+    /// A multi-byte UTF-8 character being checked as it goes by.
+    seq: [4]u8 = undefined,
+    seq_len: u3 = 0,
+    seq_need: u3 = 0,
+    seq_at: Mark = undefined,
 
     /// Scratch for the current event's text.
     buf: std.ArrayList(u8) = .empty,
     /// Names and values of the current tag's attributes, back to back.
     tag_buf: std.ArrayList(u8) = .empty,
     attrs: std.ArrayList(Attribute) = .empty,
-    raw_attrs: std.ArrayList(struct { name: Span, value: Span }) = .empty,
+    raw_attrs: std.ArrayList(struct { name: Span, value: Span, at: Mark }) = .empty,
     /// The name in the entity reference being read.
     ref_buf: std.ArrayList(u8) = .empty,
     /// Names of the open elements, back to back, with their lengths.
@@ -228,8 +254,19 @@ pub const Reader = struct {
 
     // ------------------------------------------------------------ errors
 
+    /// Fails at the byte most recently taken.
     fn fail(self: *Reader, err: Error, message: []const u8) Error {
-        self.diagnose(message);
+        return self.failAt(self.last, err, message);
+    }
+
+    /// Fails at the next position: the end of the input, or a byte looked at but not taken.
+    fn failHere(self: *Reader, err: Error, message: []const u8) Error {
+        return self.failAt(.{ .line = self.line, .col = self.col }, err, message);
+    }
+
+    fn failAt(self: *Reader, at: Mark, err: Error, message: []const u8) Error {
+        self.diagnosed = true;
+        if (self.diag) |d| d.* = .{ .line = at.line, .column = at.col, .message = message };
         return err;
     }
 
@@ -259,7 +296,7 @@ pub const Reader = struct {
             break :blk s[0];
         };
         if (self.options.max_input_bytes != 0 and self.consumed >= self.options.max_input_bytes)
-            return self.fail(error.LimitExceeded, "the input is larger than the configured limit");
+            return self.failHere(error.LimitExceeded, "the input is larger than the configured limit");
         return b;
     }
 
@@ -292,14 +329,14 @@ pub const Reader = struct {
             cp = (try self.takeRaw()) orelse return false;
         } else {
             const unit = (try self.takeUnit()) orelse return false;
-            if (unit >= 0xDC00 and unit <= 0xDFFF) return self.fail(error.InvalidCharacter, "a lone low surrogate in UTF-16");
+            if (unit >= 0xDC00 and unit <= 0xDFFF) return self.failHere(error.InvalidCharacter, "a lone low surrogate in UTF-16");
             if (unit >= 0xD800 and unit <= 0xDBFF) {
-                const low = (try self.takeUnit()) orelse return self.fail(error.UnexpectedEof, "the document ends inside a UTF-16 surrogate pair");
-                if (low < 0xDC00 or low > 0xDFFF) return self.fail(error.InvalidCharacter, "a high surrogate without its low surrogate in UTF-16");
+                const low = (try self.takeUnit()) orelse return self.failHere(error.UnexpectedEof, "the document ends inside a UTF-16 surrogate pair");
+                if (low < 0xDC00 or low > 0xDFFF) return self.failHere(error.InvalidCharacter, "a high surrogate without its low surrogate in UTF-16");
                 cp = 0x10000 + ((@as(u21, unit) - 0xD800) << 10) + (low - 0xDC00);
             } else cp = unit;
         }
-        const n = std.unicode.utf8Encode(cp, &self.pend) catch return self.fail(error.InvalidCharacter, "a character that cannot be represented");
+        const n = std.unicode.utf8Encode(cp, &self.pend) catch return self.failHere(error.InvalidCharacter, "a character that cannot be represented");
         self.pend_len = @intCast(n);
         self.pend_pos = 0;
         return true;
@@ -307,7 +344,7 @@ pub const Reader = struct {
 
     fn takeUnit(self: *Reader) Error!?u16 {
         const b0 = (try self.takeRaw()) orelse return null;
-        const b1 = (try self.takeRaw()) orelse return self.fail(error.UnexpectedEof, "the document ends inside a UTF-16 character");
+        const b1 = (try self.takeRaw()) orelse return self.failHere(error.UnexpectedEof, "the document ends inside a UTF-16 character");
         return if (self.enc == .utf16le) @as(u16, b1) << 8 | b0 else @as(u16, b0) << 8 | b1;
     }
 
@@ -326,8 +363,8 @@ pub const Reader = struct {
     /// The next byte with line ends normalized (`\r\n` and `\r` become `\n`), or null at the end.
     fn takeByte(self: *Reader) Error!?u8 {
         var b = (try self.peekByte()) orelse return null;
+        const at: Mark = .{ .line = self.line, .col = self.col };
         self.tossByte();
-        if (self.ascii_only and b >= 0x80) return self.fail(error.InvalidCharacter, "a byte outside US-ASCII in a document that declares it");
         if (b == '\r') {
             if ((try self.peekByte()) == @as(u8, '\n')) self.tossByte();
             b = '\n';
@@ -336,11 +373,38 @@ pub const Reader = struct {
             self.line += 1;
             self.col = 1;
         } else self.col += 1;
+        self.last = at;
+        // Printable ASCII, outside any multi-byte character, needs no further look.
+        if (self.seq_len != 0 or b < 0x20 or b >= 0x80) try self.checkChar(b, at);
         return b;
     }
 
+    /// Checks that the bytes taken are UTF-8 and made of XML `Char`s (production 2), so that a
+    /// fault is reported where it is, not where its token ends.
+    fn checkChar(self: *Reader, b: u8, at: Mark) Error!void {
+        const bad = "invalid UTF-8 or a character XML does not allow";
+        if (self.ascii_only and b >= 0x80) return self.fail(error.InvalidCharacter, "a byte outside US-ASCII in a document that declares it");
+        if (self.seq_len == 0) {
+            if (b < 0x80) {
+                if (!chars.isChar(b)) return self.fail(error.InvalidCharacter, bad);
+                return;
+            }
+            self.seq_need = std.unicode.utf8ByteSequenceLength(b) catch return self.fail(error.InvalidCharacter, bad);
+            self.seq_at = at;
+        }
+        self.seq[self.seq_len] = b;
+        self.seq_len += 1;
+        if (self.seq_len < self.seq_need) {
+            if (self.seq_len > 1 and b & 0xC0 != 0x80) return self.failAt(self.seq_at, error.InvalidCharacter, bad);
+            return;
+        }
+        // `validText` judges the whole character: continuation bytes, overlongs, surrogates, `Char`.
+        if (!chars.validText(self.seq[0..self.seq_len])) return self.failAt(self.seq_at, error.InvalidCharacter, bad);
+        self.seq_len = 0;
+    }
+
     fn mustTake(self: *Reader) Error!u8 {
-        return (try self.takeByte()) orelse self.fail(error.UnexpectedEof, "the document ends inside markup");
+        return (try self.takeByte()) orelse self.failHere(error.UnexpectedEof, "the document ends inside markup");
     }
 
     fn expect(self: *Reader, literal: []const u8) Error!void {
@@ -406,23 +470,23 @@ pub const Reader = struct {
 
     fn readStart(self: *Reader) Error!Event {
         // Byte order mark, or the first bytes of `<?` in UTF-16 (XML 1.0, appendix F).
-        const head = (try self.peekRaw()) orelse return self.fail(error.UnexpectedEof, "the document is empty");
+        const head = (try self.peekRaw()) orelse return self.failHere(error.UnexpectedEof, "the document is empty");
         switch (head) {
             0xEF => {
                 for ("\xEF\xBB\xBF") |want| {
-                    const b = (try self.takeRaw()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
-                    if (b != want) return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                    const b = (try self.takeRaw()) orelse return self.failHere(error.InvalidSyntax, "the document does not start with XML");
+                    if (b != want) return self.failHere(error.InvalidSyntax, "the document does not start with XML");
                 }
                 self.had_utf8_bom = true;
             },
             0xFE, 0xFF => {
                 _ = try self.takeRaw();
-                const second = (try self.takeRaw()) orelse return self.fail(error.InvalidSyntax, "the document does not start with XML");
+                const second = (try self.takeRaw()) orelse return self.failHere(error.InvalidSyntax, "the document does not start with XML");
                 if (head == 0xFE and second == 0xFF) {
                     self.enc = .utf16be;
                 } else if (head == 0xFF and second == 0xFE) {
                     self.enc = .utf16le;
-                } else return self.fail(error.UnsupportedEncoding, "the byte order mark is not UTF-8 or UTF-16");
+                } else return self.failHere(error.UnsupportedEncoding, "the byte order mark is not UTF-8 or UTF-16");
             },
             0x00, '<' => {
                 // UTF-16 without a mark starts `\0<` (big endian) or `<\0` (little endian).
@@ -430,7 +494,7 @@ pub const Reader = struct {
                 const second = try self.peekRaw();
                 self.unreadRaw(head);
                 if (head == 0x00) {
-                    if (second != @as(u8, '<')) return self.fail(error.UnsupportedEncoding, "this encoding is not supported (UTF-8, UTF-16 and ISO-8859-1 are)");
+                    if (second != @as(u8, '<')) return self.failHere(error.UnsupportedEncoding, "this encoding is not supported (UTF-8, UTF-16 and ISO-8859-1 are)");
                     self.enc = .utf16be;
                 } else if (second == @as(u8, 0x00)) self.enc = .utf16le;
             },
@@ -441,8 +505,7 @@ pub const Reader = struct {
     }
 
     /// The pseudo-attributes of an XML declaration; `self.buf` holds the text after `<?xml`.
-    fn readXmlDecl(self: *Reader) Error!Event {
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid character in the XML declaration");
+    fn readXmlDecl(self: *Reader, start: Mark) Error!Event {
         const text = self.buf.items;
         var version: ?[]const u8 = null;
         var encoding: ?[]const u8 = null;
@@ -455,57 +518,58 @@ pub const Reader = struct {
             while (i < text.len and chars.isSpace(text[i])) i += 1;
             if (i >= text.len) break;
             // Each pseudo-attribute is set off by whitespace (production 23 and following).
-            if (i == before and !first_attr) return self.fail(error.InvalidSyntax, "pseudo-attributes of the XML declaration must be separated by whitespace");
+            if (i == before and !first_attr) return self.failAt(start.within(text, i), error.InvalidSyntax, "pseudo-attributes of the XML declaration must be separated by whitespace");
             first_attr = false;
             const ns = i;
             while (i < text.len and text[i] != '=' and !chars.isSpace(text[i])) i += 1;
             const key = text[ns..i];
             while (i < text.len and chars.isSpace(text[i])) i += 1;
-            if (i >= text.len or text[i] != '=') return self.fail(error.InvalidSyntax, "malformed XML declaration");
+            if (i >= text.len or text[i] != '=') return self.failAt(start.within(text, i), error.InvalidSyntax, "malformed XML declaration");
             i += 1;
             while (i < text.len and chars.isSpace(text[i])) i += 1;
-            if (i >= text.len or (text[i] != '"' and text[i] != '\'')) return self.fail(error.InvalidSyntax, "malformed XML declaration");
+            if (i >= text.len or (text[i] != '"' and text[i] != '\'')) return self.failAt(start.within(text, i), error.InvalidSyntax, "malformed XML declaration");
             const q = text[i];
             i += 1;
             const vs = i;
             while (i < text.len and text[i] != q) i += 1;
-            if (i >= text.len) return self.fail(error.InvalidSyntax, "malformed XML declaration");
+            if (i >= text.len) return self.failAt(start.within(text, vs - 1), error.InvalidSyntax, "malformed XML declaration");
             const val = text[vs..i];
             i += 1;
             if (std.mem.eql(u8, key, "version")) {
-                if (seen != 0) return self.fail(error.InvalidSyntax, "version must come first in the XML declaration");
+                if (seen != 0) return self.failAt(start.within(text, ns), error.InvalidSyntax, "version must come first in the XML declaration");
                 version = val;
                 seen = 1;
             } else if (std.mem.eql(u8, key, "encoding")) {
-                if (seen != 1) return self.fail(error.InvalidSyntax, "encoding must follow version in the XML declaration");
+                if (seen != 1) return self.failAt(start.within(text, ns), error.InvalidSyntax, "encoding must follow version in the XML declaration");
                 encoding = val;
                 seen = 2;
             } else if (std.mem.eql(u8, key, "standalone")) {
-                if (seen == 0 or seen == 3) return self.fail(error.InvalidSyntax, "standalone is misplaced in the XML declaration");
-                if (std.mem.eql(u8, val, "yes")) standalone = true else if (std.mem.eql(u8, val, "no")) standalone = false else return self.fail(error.InvalidSyntax, "standalone must be yes or no");
+                if (seen == 0 or seen == 3) return self.failAt(start.within(text, ns), error.InvalidSyntax, "standalone is misplaced in the XML declaration");
+                if (std.mem.eql(u8, val, "yes")) standalone = true else if (std.mem.eql(u8, val, "no")) standalone = false else return self.failAt(start.within(text, vs), error.InvalidSyntax, "standalone must be yes or no");
                 seen = 3;
-            } else return self.fail(error.InvalidSyntax, "unknown pseudo-attribute in the XML declaration");
+            } else return self.failAt(start.within(text, ns), error.InvalidSyntax, "unknown pseudo-attribute in the XML declaration");
         }
-        const v = version orelse return self.fail(error.InvalidSyntax, "the XML declaration needs a version");
+        const v = version orelse return self.failAt(start.within(text, text.len), error.InvalidSyntax, "the XML declaration needs a version");
+        const version_at = start.within(text, @intFromPtr(v.ptr) - @intFromPtr(text.ptr));
         // VersionNum is `1.` and digits (production 26, fifth edition). 1.1 has different rules
         // (line ends, name characters) that are not implemented, so it is refused rather than misread.
-        if (v.len < 3 or !std.mem.startsWith(u8, v, "1.")) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
-        for (v[2..]) |d| if (!std.ascii.isDigit(d)) return self.fail(error.InvalidSyntax, "a version number is 1. followed by digits");
-        if (std.mem.eql(u8, v, "1.1")) return self.fail(error.UnsupportedVersion, "XML 1.1 is not supported");
-        if (encoding) |enc| try self.applyDeclaredEncoding(enc);
+        if (v.len < 3 or !std.mem.startsWith(u8, v, "1.")) return self.failAt(version_at, error.InvalidSyntax, "a version number is 1. followed by digits");
+        for (v[2..]) |d| if (!std.ascii.isDigit(d)) return self.failAt(version_at, error.InvalidSyntax, "a version number is 1. followed by digits");
+        if (std.mem.eql(u8, v, "1.1")) return self.failAt(version_at, error.UnsupportedVersion, "XML 1.1 is not supported");
+        if (encoding) |enc| try self.applyDeclaredEncoding(enc, start.within(text, @intFromPtr(enc.ptr) - @intFromPtr(text.ptr)));
         return .{ .xml_decl = .{ .version = v, .encoding = encoding, .standalone = standalone } };
     }
 
     /// Checks the encoding named in the declaration against how the document was detected, and
     /// switches to ISO-8859-1 decoding if that is what it says.
-    fn applyDeclaredEncoding(self: *Reader, enc: []const u8) Error!void {
+    fn applyDeclaredEncoding(self: *Reader, enc: []const u8, at: Mark) Error!void {
         const eql = std.ascii.eqlIgnoreCase;
         const is_utf16 = eql(enc, "utf-16") or eql(enc, "utf-16le") or eql(enc, "utf-16be");
         const is_latin1 = eql(enc, "iso-8859-1") or eql(enc, "iso_8859-1") or eql(enc, "latin1") or eql(enc, "latin-1") or eql(enc, "l1");
         switch (self.enc) {
             .utf16le, .utf16be => {
                 const wrong_order = if (self.enc == .utf16le) eql(enc, "utf-16be") else eql(enc, "utf-16le");
-                if (!is_utf16 or wrong_order) return self.fail(error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
+                if (!is_utf16 or wrong_order) return self.failAt(at, error.UnsupportedEncoding, "the declared encoding does not match the UTF-16 document");
             },
             .utf8 => {
                 if (eql(enc, "utf-8")) return;
@@ -517,7 +581,7 @@ pub const Reader = struct {
                     self.enc = .latin1;
                     return;
                 }
-                return self.fail(error.UnsupportedEncoding, "unsupported or conflicting encoding (UTF-8, US-ASCII, UTF-16 and ISO-8859-1 are supported)");
+                return self.failAt(at, error.UnsupportedEncoding, "unsupported or conflicting encoding (UTF-8, US-ASCII, UTF-16 and ISO-8859-1 are supported)");
             },
             .latin1 => {},
         }
@@ -529,11 +593,11 @@ pub const Reader = struct {
         while (true) {
             if (try self.skipSpace()) self.first_token = false;
             const b = (try self.peekByte()) orelse {
-                if (self.state == .prolog) return self.fail(error.UnexpectedEof, "the document has no root element");
+                if (self.state == .prolog) return self.failHere(error.UnexpectedEof, "the document has no root element");
                 self.state = .done;
                 return .end_of_document;
             };
-            if (b != '<') return self.fail(error.InvalidSyntax, if (self.state == .prolog) "text before the root element" else "text after the root element");
+            if (b != '<') return self.failHere(error.InvalidSyntax, if (self.state == .prolog) "text before the root element" else "text after the root element");
             _ = try self.takeByte();
             const c = try self.mustTake();
             switch (c) {
@@ -554,7 +618,7 @@ pub const Reader = struct {
     }
 
     fn readContent(self: *Reader) Error!Event {
-        const b = (try self.peekByte()) orelse return self.fail(error.UnexpectedEof, "the document ends inside an element");
+        const b = (try self.peekByte()) orelse return self.failHere(error.UnexpectedEof, "the document ends inside an element");
         if (b != '<') return self.readText();
         _ = try self.takeByte();
         const c = try self.mustTake();
@@ -575,6 +639,7 @@ pub const Reader = struct {
 
     /// Reads `&…;` after the `&` was taken, appending the replacement to `out`.
     fn readReference(self: *Reader, out: *std.ArrayList(u8)) Error!void {
+        const ampersand = self.last;
         const first = try self.mustTake();
         if (first == '#') {
             var hex = false;
@@ -607,21 +672,23 @@ pub const Reader = struct {
         var c = first;
         while (c != ';') : (c = try self.mustTake()) {
             // Stop at once on ASCII that no name holds; other bytes are judged as UTF-8 below.
-            if (c < 0x80 and !(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.fail(error.UndefinedEntity, bad);
+            if (c < 0x80 and !(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == ':')) return self.failAt(ampersand, error.UndefinedEntity, bad);
             if (self.ref_buf.items.len >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
             try self.ref_buf.append(self.gpa, c);
         }
         const s = self.ref_buf.items;
-        if (!chars.isName(s)) return self.fail(error.UndefinedEntity, bad);
+        if (!chars.isName(s)) return self.failAt(ampersand, error.UndefinedEntity, bad);
         // The predefined five come first: a caller's table must not change what `&lt;` means.
         const predefined = [_]Entity{ .{ .name = "lt", .value = "<" }, .{ .name = "gt", .value = ">" }, .{ .name = "amp", .value = "&" }, .{ .name = "quot", .value = "\"" }, .{ .name = "apos", .value = "'" } };
         for ([_][]const Entity{ &predefined, self.options.entities }) |table| {
             for (table) |e| if (std.mem.eql(u8, e.name, s)) {
+                // The one text that does not come through `takeByte`.
+                if (!chars.validText(e.value)) return self.failAt(ampersand, error.InvalidCharacter, "an entity value holds a character XML does not allow");
                 for (e.value) |x| try self.append(out, x);
                 return;
             };
         }
-        return self.fail(error.UndefinedEntity, "an entity that is neither predefined nor supplied");
+        return self.failAt(ampersand, error.UndefinedEntity, "an entity that is neither predefined nor supplied");
     }
 
     fn readText(self: *Reader) Error!Event {
@@ -639,7 +706,6 @@ pub const Reader = struct {
             brackets = if (b == ']') brackets + 1 else 0;
             try self.append(&self.buf, if (b == '\r') '\n' else b);
         }
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .text = self.buf.items };
     }
 
@@ -654,7 +720,6 @@ pub const Reader = struct {
             }
             try self.appendWithRoom(&self.buf, b, 2);
         }
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .cdata = self.buf.items };
     }
 
@@ -672,7 +737,6 @@ pub const Reader = struct {
             }
             try self.appendWithRoom(&self.buf, b, 1);
         }
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .comment = self.buf.items };
     }
 
@@ -680,17 +744,19 @@ pub const Reader = struct {
         // `<?` was taken: target, then optional whitespace and data, up to `?>`.
         self.buf.clearRetainingCapacity();
         var c = try self.mustTake();
+        const target_at = self.last;
         while (!chars.isSpace(c) and c != '?') : (c = try self.mustTake()) {
             if (self.buf.items.len >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
             try self.append(&self.buf, c);
         }
         const target_len = self.buf.items.len;
-        if (!chars.isName(self.buf.items)) return self.fail(error.InvalidName, "bad processing instruction target");
-        if (self.options.namespaces and std.mem.indexOfScalar(u8, self.buf.items, ':') != null) return self.fail(error.InvalidName, "a processing instruction target cannot contain a colon");
+        if (!chars.isName(self.buf.items)) return self.failAt(.{ .line = target_at.line, .col = target_at.col + chars.nameFault(self.buf.items) }, error.InvalidName, "bad processing instruction target");
+        if (self.options.namespaces and std.mem.indexOfScalar(u8, self.buf.items, ':') != null) return self.failAt(target_at, error.InvalidName, "a processing instruction target cannot contain a colon");
         const is_decl_target = std.mem.eql(u8, self.buf.items, "xml");
         if (std.ascii.eqlIgnoreCase(self.buf.items, "xml") and !(is_decl_target and self.first_token and chars.isSpace(c)))
-            return self.fail(error.InvalidSyntax, "an XML declaration is only allowed at the very start");
+            return self.failAt(target_at, error.InvalidSyntax, "an XML declaration is only allowed at the very start");
         if (is_decl_target and self.first_token) {
+            const decl_at: Mark = .{ .line = self.line, .col = self.col };
             self.buf.clearRetainingCapacity();
             while (true) {
                 const b = try self.mustTake();
@@ -700,7 +766,7 @@ pub const Reader = struct {
                 }
                 try self.append(&self.buf, b);
             }
-            return self.readXmlDecl();
+            return self.readXmlDecl(decl_at);
         }
         if (c == '?') {
             if ((try self.mustTake()) != '>') return self.fail(error.InvalidSyntax, "malformed processing instruction");
@@ -715,7 +781,6 @@ pub const Reader = struct {
             }
             try self.append(&self.buf, b);
         }
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .processing_instruction = .{ .target = self.buf.items[0..target_len], .data = self.buf.items[target_len..] } };
     }
 
@@ -726,6 +791,7 @@ pub const Reader = struct {
         try self.expect("OCTYPE");
         if (!chars.isSpace(try self.mustTake())) return self.fail(error.InvalidSyntax, "whitespace is needed after <!DOCTYPE");
         self.buf.clearRetainingCapacity();
+        const start: Mark = .{ .line = self.line, .col = self.col };
         var bracket_depth: u32 = 0;
         var quote: u8 = 0;
         var skipping: enum { no, comment, pi } = .no;
@@ -759,8 +825,7 @@ pub const Reader = struct {
             }
             try self.append(&self.buf, b);
         }
-        if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
-        if (doctype.check(self.buf.items)) |fault| return self.fail(error.InvalidSyntax, fault.message);
+        if (doctype.check(self.buf.items)) |fault| return self.failAt(start.within(self.buf.items, fault.at), error.InvalidSyntax, fault.message);
         self.doctype_seen = true;
         return .{ .doctype = std.mem.trim(u8, self.buf.items, " \t\n") };
     }
@@ -771,6 +836,7 @@ pub const Reader = struct {
     fn readName(self: *Reader, first: u8) Error!Span {
         const start: u32 = @intCast(self.tag_buf.items.len);
         var c = first;
+        const at = self.last;
         while (true) {
             if (chars.isSpace(c) or c == '/' or c == '>' or c == '=') break;
             if (self.tag_buf.items.len - start >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
@@ -781,7 +847,8 @@ pub const Reader = struct {
             _ = try self.takeByte();
         }
         const len: u32 = @intCast(self.tag_buf.items.len - start);
-        if (!chars.isName(self.tag_buf.items[start..])) return self.fail(error.InvalidName, "not a valid XML name");
+        const name = self.tag_buf.items[start..];
+        if (!chars.isName(name)) return self.failAt(.{ .line = at.line, .col = at.col + chars.nameFault(name) }, error.InvalidName, "not a valid XML name");
         return .{ .off = start, .len = len };
     }
 
@@ -806,7 +873,6 @@ pub const Reader = struct {
                 else => try self.append(&tmp, b),
             }
         }
-        if (!chars.validText(tmp.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         try self.roomInTag(tmp.items.len);
         try self.tag_buf.appendSlice(self.gpa, tmp.items);
         return .{ .off = start, .len = @intCast(tmp.items.len) };
@@ -845,6 +911,7 @@ pub const Reader = struct {
         if (self.name_lens.items.len >= self.options.max_depth) return self.fail(error.LimitExceeded, "elements are nested deeper than the configured limit");
         self.tag_buf.clearRetainingCapacity();
         self.raw_attrs.clearRetainingCapacity();
+        const elem_at = self.last;
         const elem = try self.readName(first);
         var empty = false;
         var had_space = false;
@@ -859,19 +926,20 @@ pub const Reader = struct {
             }
             if (!had_space) return self.fail(error.InvalidSyntax, "attributes must be separated by whitespace");
             if (self.raw_attrs.items.len >= self.options.max_attributes) return self.fail(error.LimitExceeded, "more attributes than the configured limit");
+            const attr_at = self.last;
             const an = try self.readName(b);
             _ = try self.skipSpace();
             if ((try self.mustTake()) != '=') return self.fail(error.InvalidSyntax, "an attribute needs =");
             _ = try self.skipSpace();
             const av = try self.readAttrValue();
-            try self.raw_attrs.append(self.gpa, .{ .name = an, .value = av });
+            try self.raw_attrs.append(self.gpa, .{ .name = an, .value = av, .at = attr_at });
             had_space = false;
         }
         const tag = self.tag_buf.items;
         if (self.options.namespaces) {
-            if (!validQName(tag[elem.off..][0..elem.len])) return self.fail(error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+            if (!validQName(tag[elem.off..][0..elem.len])) return self.failAt(elem_at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
             for (self.raw_attrs.items) |ra| {
-                if (!validQName(tag[ra.name.off..][0..ra.name.len])) return self.fail(error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
+                if (!validQName(tag[ra.name.off..][0..ra.name.len])) return self.failAt(ra.at, error.InvalidName, "not a valid qualified name (one colon, with a name on each side)");
             }
         }
 
@@ -889,14 +957,14 @@ pub const Reader = struct {
             if (!is_default and !std.mem.eql(u8, sp.prefix, "xmlns")) continue;
             const pfx: []const u8 = if (is_default) "" else sp.local;
             const uri = tag[ra.value.off..][0..ra.value.len];
-            if (!is_default and (pfx.len == 0 or std.mem.eql(u8, pfx, "xmlns"))) return self.fail(error.InvalidName, "bad namespace declaration");
-            if (!is_default and uri.len == 0) return self.fail(error.InvalidSyntax, "a prefix cannot be bound to an empty namespace");
+            if (!is_default and (pfx.len == 0 or std.mem.eql(u8, pfx, "xmlns"))) return self.failAt(ra.at, error.InvalidName, "bad namespace declaration");
+            if (!is_default and uri.len == 0) return self.failAt(ra.at, error.InvalidSyntax, "a prefix cannot be bound to an empty namespace");
             // The `xml` prefix only to its own namespace, and no other prefix to it or to the xmlns namespace.
-            if (std.mem.eql(u8, pfx, "xml") and !std.mem.eql(u8, uri, xml_namespace)) return self.fail(error.InvalidSyntax, "the xml prefix can only be bound to the XML namespace");
-            if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.fail(error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
-            if (std.mem.eql(u8, uri, xmlns_namespace)) return self.fail(error.InvalidSyntax, "the xmlns namespace cannot be bound");
-            if (self.ns_binds.items.len >= self.options.max_namespace_bindings) return self.fail(error.LimitExceeded, "more namespace declarations in scope than the configured limit");
-            if (pfx.len + uri.len > self.options.max_namespace_bytes - self.ns_bytes.items.len) return self.fail(error.LimitExceeded, "the namespace names in scope are longer than the configured limit");
+            if (std.mem.eql(u8, pfx, "xml") and !std.mem.eql(u8, uri, xml_namespace)) return self.failAt(ra.at, error.InvalidSyntax, "the xml prefix can only be bound to the XML namespace");
+            if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.failAt(ra.at, error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
+            if (std.mem.eql(u8, uri, xmlns_namespace)) return self.failAt(ra.at, error.InvalidSyntax, "the xmlns namespace cannot be bound");
+            if (self.ns_binds.items.len >= self.options.max_namespace_bindings) return self.failAt(ra.at, error.LimitExceeded, "more namespace declarations in scope than the configured limit");
+            if (pfx.len + uri.len > self.options.max_namespace_bytes - self.ns_bytes.items.len) return self.failAt(ra.at, error.LimitExceeded, "the namespace names in scope are longer than the configured limit");
             const po: u32 = @intCast(self.ns_bytes.items.len);
             try self.ns_bytes.appendSlice(self.gpa, pfx);
             const uo: u32 = @intCast(self.ns_bytes.items.len);
@@ -910,21 +978,21 @@ pub const Reader = struct {
         const e_sp = self.splitName(ename);
         const e_uri: []const u8 = if (!self.options.namespaces) "" else blk: {
             if (e_sp.prefix.len == 0) break :blk self.lookupPrefix("") orelse "";
-            if (std.mem.eql(u8, e_sp.prefix, "xmlns")) return self.fail(error.InvalidName, "an element name cannot use the prefix xmlns");
-            break :blk self.lookupPrefix(e_sp.prefix) orelse return self.fail(error.UnboundPrefix, "an element uses a namespace prefix that is not declared");
+            if (std.mem.eql(u8, e_sp.prefix, "xmlns")) return self.failAt(elem_at, error.InvalidName, "an element name cannot use the prefix xmlns");
+            break :blk self.lookupPrefix(e_sp.prefix) orelse return self.failAt(elem_at, error.UnboundPrefix, "an element uses a namespace prefix that is not declared");
         };
         for (self.raw_attrs.items) |ra| {
             const qn = tag[ra.name.off..][0..ra.name.len];
             const sp = self.splitName(qn);
             var uri: []const u8 = "";
             if (self.options.namespaces) {
-                if (std.mem.eql(u8, qn, "xmlns")) uri = xmlns_namespace else if (sp.prefix.len > 0) uri = self.lookupPrefix(sp.prefix) orelse return self.fail(error.UnboundPrefix, "an attribute uses a namespace prefix that is not declared");
+                if (std.mem.eql(u8, qn, "xmlns")) uri = xmlns_namespace else if (sp.prefix.len > 0) uri = self.lookupPrefix(sp.prefix) orelse return self.failAt(ra.at, error.UnboundPrefix, "an attribute uses a namespace prefix that is not declared");
             }
             // Unique by qualified name, and (with namespaces) by expanded name.
             for (self.attrs.items) |prev| {
-                if (std.mem.eql(u8, prev.name.qualified, qn)) return self.fail(error.DuplicateAttribute, "an attribute appears twice");
+                if (std.mem.eql(u8, prev.name.qualified, qn)) return self.failAt(ra.at, error.DuplicateAttribute, "an attribute appears twice");
                 if (self.options.namespaces and uri.len > 0 and std.mem.eql(u8, prev.name.uri, uri) and std.mem.eql(u8, prev.name.local, sp.local))
-                    return self.fail(error.DuplicateAttribute, "two attributes have the same expanded name");
+                    return self.failAt(ra.at, error.DuplicateAttribute, "two attributes have the same expanded name");
             }
             try self.attrs.append(self.gpa, .{ .name = .{ .qualified = qn, .prefix = sp.prefix, .local = sp.local, .uri = uri }, .value = tag[ra.value.off..][0..ra.value.len] });
         }

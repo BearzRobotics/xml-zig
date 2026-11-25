@@ -277,6 +277,62 @@ test "line ends are normalized and positions are reported" {
     try testing.expect(diag.message.len > 0);
 }
 
+test "errors are reported at the fault" {
+    const cases = [_]struct { src: []const u8, err: xml.Error, line: u64, column: u64 }{
+        // A bad character, not the end of the token or of the document that holds it.
+        .{ .src = "<a>\x01\n\n\n</a>", .err = error.InvalidCharacter, .line = 1, .column = 4 },
+        .{ .src = "<a>\n12\xFF\n</a>", .err = error.InvalidCharacter, .line = 2, .column = 3 },
+        .{ .src = "<a>\xC3(</a>", .err = error.InvalidCharacter, .line = 1, .column = 4 },
+        .{ .src = "<a>ab\xEF\xBF\xBE</a>", .err = error.InvalidCharacter, .line = 1, .column = 6 },
+        .{ .src = "<a>\xED\xA0\x80</a>", .err = error.InvalidCharacter, .line = 1, .column = 4 },
+        .{ .src = "<a b='x\x02y'/>", .err = error.InvalidCharacter, .line = 1, .column = 8 },
+        .{ .src = "<a><!--\n\x03--></a>", .err = error.InvalidCharacter, .line = 2, .column = 1 },
+        .{ .src = "<?xml version='1.0' encoding='us-ascii'?>\n<a>\xC3\xA9</a>", .err = error.InvalidCharacter, .line = 2, .column = 4 },
+        // Names: the first character that does not belong.
+        .{ .src = "<a b$='1'/>", .err = error.InvalidName, .line = 1, .column = 5 },
+        .{ .src = "<1a/>", .err = error.InvalidName, .line = 1, .column = 2 },
+        .{ .src = "<a>\n  <\xC3\xA9! />\n</a>", .err = error.InvalidName, .line = 2, .column = 6 },
+        .{ .src = "<a><?p$ x?></a>", .err = error.InvalidName, .line = 1, .column = 7 },
+        // Faults found once the whole tag is read point back at the name concerned.
+        .{ .src = "<a\n  x='1'\n  x='2'\n>", .err = error.DuplicateAttribute, .line = 3, .column = 3 },
+        .{ .src = "<a\n p:x='1'\n y='2'/>", .err = error.UnboundPrefix, .line = 2, .column = 2 },
+        .{ .src = "<r><p:a\n\n/></r>", .err = error.UnboundPrefix, .line = 1, .column = 5 },
+        .{ .src = "<a\n xmlns:p=''/>", .err = error.InvalidSyntax, .line = 2, .column = 2 },
+        // Single bytes.
+        .{ .src = "<a b='<'/>", .err = error.InvalidSyntax, .line = 1, .column = 7 },
+        .{ .src = "<a b=1/>", .err = error.InvalidSyntax, .line = 1, .column = 6 },
+        .{ .src = "<a>]]></a>", .err = error.InvalidSyntax, .line = 1, .column = 6 },
+        .{ .src = "<a></b>", .err = error.MismatchedTag, .line = 1, .column = 6 },
+        .{ .src = "<a/>\n x", .err = error.InvalidSyntax, .line = 2, .column = 2 },
+        .{ .src = "<a/><b/>", .err = error.InvalidSyntax, .line = 1, .column = 6 },
+        // Line ends count once, however they are written.
+        .{ .src = "<a>\r\n\r\n\r  &x;</a>", .err = error.UndefinedEntity, .line = 4, .column = 3 },
+        .{ .src = "<a>&#x4G;</a>", .err = error.InvalidCharacterReference, .line = 1, .column = 8 },
+        // The XML declaration and the DOCTYPE are checked after they are read.
+        .{ .src = "<?xml version='1.0'\n  standalone='maybe'?><a/>", .err = error.InvalidSyntax, .line = 2, .column = 15 },
+        .{ .src = "<?xml version='2.0'?><a/>", .err = error.InvalidSyntax, .line = 1, .column = 16 },
+        .{ .src = "<?xml version='1.0' encoding='ebcdic'?><a/>", .err = error.UnsupportedEncoding, .line = 1, .column = 31 },
+        .{ .src = "<!DOCTYPE a [\n] junk><a/>", .err = error.InvalidSyntax, .line = 2, .column = 3 },
+        // The end of the input: just past the last byte.
+        .{ .src = "<a>\n<b>", .err = error.UnexpectedEof, .line = 2, .column = 4 },
+        .{ .src = "<a", .err = error.UnexpectedEof, .line = 1, .column = 3 },
+    };
+    for (cases) |c| {
+        var diag: xml.Diagnostic = .{};
+        var r: Io.Reader = .fixed(c.src);
+        var rd = xml.Reader.init(testing.allocator, &r, .{}, &diag);
+        defer rd.deinit();
+        const got: xml.Error = while (true) {
+            const ev = rd.next() catch |e| break e;
+            try testing.expect(ev != .end_of_document);
+        };
+        errdefer std.debug.print("case: {f} -> {f}\n", .{ std.zig.fmtString(c.src), diag });
+        try testing.expectEqual(c.err, got);
+        try testing.expectEqual(c.line, diag.line);
+        try testing.expectEqual(c.column, diag.column);
+    }
+}
+
 test "attribute whitespace is normalized, references are not" {
     var r: Io.Reader = .fixed("<a v='x\ty\nz&#10;w'/>");
     var rd = xml.Reader.init(testing.allocator, &r, .{}, null);
@@ -637,8 +693,9 @@ test "caller-supplied entities" {
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("12", got);
     try testing.expectError(error.LimitExceeded, drain("<a>&abcdefgh;</a>", .{ .max_name_bytes = 4 }));
-    for ([_][]const u8{ "<a>&1x;</a>", "<a>& x;</a>", "<a>&;</a>", "<a>&\xFF;</a>", "<a>&a<b;</a>" }) |src|
+    for ([_][]const u8{ "<a>&1x;</a>", "<a>& x;</a>", "<a>&;</a>", "<a>&a<b;</a>" }) |src|
         try testing.expectError(error.UndefinedEntity, drain(src, .{ .entities = &named }));
+    try testing.expectError(error.InvalidCharacter, drain("<a>&\xFF;</a>", .{})); // not UTF-8 at all
     // The five predefined entities cannot be redefined.
     const redefined = [_]xml.Entity{ .{ .name = "lt", .value = "L" }, .{ .name = "gt", .value = "G" }, .{ .name = "amp", .value = "A" }, .{ .name = "quot", .value = "Q" }, .{ .name = "apos", .value = "P" } };
     const same = try firstText("<a>&lt;&gt;&amp;&quot;&apos;</a>", .{ .entities = &redefined });

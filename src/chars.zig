@@ -83,6 +83,17 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
+/// For a string that is not a `Name`: the offset of the first byte that keeps it from being one.
+pub fn nameFault(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len) {
+        const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return i;
+        if (i + n > s.len or !isName(s[0 .. i + n])) return i;
+        i += n;
+    }
+    return i;
+}
+
 const testing = std.testing;
 
 test "name characters" {
