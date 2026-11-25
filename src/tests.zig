@@ -289,6 +289,23 @@ test "read and allocation failures fill the diagnostic too" {
     try testing.expect(index > 3);
 }
 
+test "positions count past 32 bits" {
+    // Streaming 4 GiB is too slow for a unit test, so start the counters where they used to overflow.
+    var diag: xml.Diagnostic = .{};
+    var r: Io.Reader = .fixed("<a>   \n\n  </b>");
+    var rd = xml.Reader.init(testing.allocator, &r, .{}, &diag);
+    defer rd.deinit();
+    rd.col = std.math.maxInt(u32) - 1;
+    rd.line = std.math.maxInt(u32) - 1;
+    while (true) _ = rd.next() catch break;
+    try testing.expect(diag.line > std.math.maxInt(u32));
+}
+
+test "a character reference cannot go on for ever" {
+    try drain("<a>&#0000065;</a>", .{ .max_token_bytes = 16 });
+    try testing.expectError(error.LimitExceeded, drain("<a>&#000000000000000000065;</a>", .{ .max_token_bytes = 16 }));
+}
+
 /// A Reader that hands out `chunk` bytes at a time and can fail part-way.
 const Trickle = struct {
     data: []const u8,

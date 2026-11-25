@@ -44,9 +44,10 @@ pub const Error = error{
 };
 
 pub const Diagnostic = struct {
-    /// 1-based line; columns count bytes.
-    line: u32 = 0,
-    column: u32 = 0,
+    /// 1-based line; columns count bytes. 64 bits: a streamed document may put more than
+    /// 4 GiB on one line.
+    line: u64 = 0,
+    column: u64 = 0,
     message: []const u8 = "",
 
     pub fn format(self: Diagnostic, w: *Io.Writer) Io.Writer.Error!void {
@@ -146,8 +147,8 @@ pub const Reader = struct {
     diag: ?*Diagnostic,
 
     state: State = .start,
-    line: u32 = 1,
-    col: u32 = 1,
+    line: u64 = 1,
+    col: u64 = 1,
     consumed: u64 = 0,
 
     /// Scratch for the current event's text.
@@ -545,11 +546,13 @@ pub const Reader = struct {
                 c = try self.mustTake();
             }
             var value: u32 = 0;
-            var digits: u32 = 0;
+            var digits: u64 = 0;
             while (c != ';') : (c = try self.mustTake()) {
                 const d: u32 = if (hex) (std.fmt.charToDigit(c, 16) catch return self.fail(error.InvalidCharacterReference, "bad digit in a character reference")) else (std.fmt.charToDigit(c, 10) catch return self.fail(error.InvalidCharacterReference, "bad digit in a character reference"));
                 value = value * @as(u32, if (hex) 16 else 10) + d;
                 digits += 1;
+                // Leading zeros never reach the range check, so bound the reference like any token.
+                if (digits > self.options.max_token_bytes) return self.fail(error.LimitExceeded, "a token is longer than the configured limit");
                 if (value > 0x10FFFF) return self.fail(error.InvalidCharacterReference, "a character reference is out of range");
             }
             if (digits == 0) return self.fail(error.InvalidCharacterReference, "an empty character reference");
