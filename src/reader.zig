@@ -85,7 +85,7 @@ pub const Options = struct {
     /// Largest single text run, attribute value, comment, CDATA section,
     /// processing instruction or DOCTYPE, in bytes.
     max_token_bytes: u32 = 16 * 1024 * 1024,
-    /// Total input accepted, in bytes (0 = unlimited).
+    /// Total input accepted, in bytes as read from the source, before any decoding (0 = unlimited).
     max_input_bytes: u64 = 0,
 };
 
@@ -227,20 +227,35 @@ pub const Reader = struct {
 
     // ------------------------------------------------------- byte access
 
+    /// The next byte of input, or null at the end. Every input byte passes through here and
+    /// `tossRaw`, which is what makes `max_input_bytes` exact for every encoding.
     fn peekRaw(self: *Reader) Error!?u8 {
-        if (self.push_len > 0) return self.push[0];
-        const s = self.src.peek(1) catch |e| switch (e) {
-            error.EndOfStream => return null,
-            error.ReadFailed => return error.ReadFailed,
+        const b = if (self.push_len > 0) self.push[0] else blk: {
+            const s = self.src.peek(1) catch |e| switch (e) {
+                error.EndOfStream => return null,
+                error.ReadFailed => return error.ReadFailed,
+            };
+            break :blk s[0];
         };
-        return s[0];
+        if (self.options.max_input_bytes != 0 and self.consumed >= self.options.max_input_bytes)
+            return self.fail(error.LimitExceeded, "the input is larger than the configured limit");
+        return b;
     }
 
     fn tossRaw(self: *Reader) void {
+        self.consumed += 1;
         if (self.push_len > 0) {
             self.push_len -= 1;
             self.push[0] = self.push[1];
         } else self.src.toss(1);
+    }
+
+    /// Puts back the byte just taken, to be read again.
+    fn unreadRaw(self: *Reader, b: u8) void {
+        if (self.push_len > 0) self.push[1] = self.push[0];
+        self.push[0] = b;
+        self.push_len += 1;
+        self.consumed -= 1;
     }
 
     fn takeRaw(self: *Reader) Error!?u8 {
@@ -290,15 +305,9 @@ pub const Reader = struct {
     /// The next byte with line ends normalized (`\r\n` and `\r` become `\n`), or null at the end.
     fn takeByte(self: *Reader) Error!?u8 {
         var b = (try self.peekByte()) orelse return null;
-        if (self.options.max_input_bytes != 0 and self.consumed >= self.options.max_input_bytes)
-            return self.fail(error.LimitExceeded, "the input is larger than the configured limit");
         self.tossByte();
-        self.consumed += 1;
         if (b == '\r') {
-            if ((try self.peekByte()) == @as(u8, '\n')) {
-                self.tossByte();
-                self.consumed += 1;
-            }
+            if ((try self.peekByte()) == @as(u8, '\n')) self.tossByte();
             b = '\n';
         }
         if (b == '\n') {
@@ -389,17 +398,13 @@ pub const Reader = struct {
             },
             0x00, '<' => {
                 // UTF-16 without a mark starts `\0<` (big endian) or `<\0` (little endian).
-                _ = try self.takeRaw();
-                self.push[0] = head;
-                self.push_len = 1;
-                const second = self.src.peek(1) catch |e| switch (e) {
-                    error.EndOfStream => null,
-                    error.ReadFailed => return error.ReadFailed,
-                };
+                self.tossRaw();
+                const second = try self.peekRaw();
+                self.unreadRaw(head);
                 if (head == 0x00) {
-                    if (second == null or second.?[0] != '<') return self.fail(error.UnsupportedEncoding, "this encoding is not supported (UTF-8, UTF-16 and ISO-8859-1 are)");
+                    if (second != @as(u8, '<')) return self.fail(error.UnsupportedEncoding, "this encoding is not supported (UTF-8, UTF-16 and ISO-8859-1 are)");
                     self.enc = .utf16be;
-                } else if (second != null and second.?[0] == 0x00) self.enc = .utf16le;
+                } else if (second == @as(u8, 0x00)) self.enc = .utf16le;
             },
             else => {},
         }

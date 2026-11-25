@@ -306,6 +306,28 @@ test "a character reference cannot go on for ever" {
     try testing.expectError(error.LimitExceeded, drain("<a>&#000000000000000000065;</a>", .{ .max_token_bytes = 16 }));
 }
 
+test "max_input_bytes counts the bytes of the source, whatever the encoding" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "<a>12345</a>",
+        "<a/>\r\n",
+        "<a>\r\n\r\n</a>",
+        "\xEF\xBB\xBF<a/>",
+        "<?xml version='1.0' encoding='latin1'?><a>\xE9\xE9\xE9</a>",
+        try utf16(a, "<a>12345</a>", true, true),
+        try utf16(a, "<a>12345</a>", false, true),
+        try utf16(a, "<a>\u{1F600}</a>", true, false),
+        try utf16(a, "<a>\r\n</a>", false, false),
+    }) |src| {
+        errdefer std.debug.print("case: {any}\n", .{src});
+        // Exactly the length of the document is enough; one byte less never is.
+        try drain(src, .{ .max_input_bytes = src.len });
+        try testing.expectError(error.LimitExceeded, drain(src, .{ .max_input_bytes = src.len - 1 }));
+    }
+}
+
 /// A Reader that hands out `chunk` bytes at a time and can fail part-way.
 const Trickle = struct {
     data: []const u8,
