@@ -42,7 +42,14 @@ pub fn build(b: *std.Build) void {
     const cli_exe = b.addExecutable(.{ .name = "xml-parse", .root_module = cli_mod });
     const cli_step = b.step("cli", "Build zig-out/bin/xml-parse");
     cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
-    test_step.dependOn(&cli_exe.step);
+    // The command line itself, where there is a POSIX shell to drive it.
+    if (b.graph.host.result.os.tag != .windows and target.query.isNative()) {
+        const cli_test = b.addSystemCommand(&.{ "sh", "tests/cli.sh" });
+        cli_test.addArtifactArg(cli_exe);
+        cli_test.addFileInput(b.path("tests/cli.sh"));
+        cli_test.expectExitCode(0);
+        test_step.dependOn(&cli_test.step);
+    } else test_step.dependOn(&cli_exe.step);
 
     // The W3C conformance suite (fetched separately; see scripts/fetch-conformance.sh).
     const conf_mod = b.createModule(.{
