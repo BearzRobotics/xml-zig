@@ -543,6 +543,14 @@ fn expectIndented(src: []const u8, want: []const u8) !void {
     try testing.expectEqualStrings(want, again);
 }
 
+test "an empty element written in full round-trips at the root" {
+    for ([_][]const u8{ "<a></a>", "<p:a xmlns:p=\"u\"></p:a>" }) |src| {
+        const out = try roundTrip(src, .{});
+        defer testing.allocator.free(out);
+        try testing.expectEqualStrings(src, std.mem.trimEnd(u8, out, "\n"));
+    }
+}
+
 test "writing with an indent leaves text content alone" {
     try expectIndented("<p><b>a</b> and <i>b</i></p>", "<p><b>a</b> and <i>b</i></p>\n");
     try expectIndented("<p><b><u/></b><![CDATA[x]]></p>", "<p><b><u/></b><![CDATA[x]]></p>\n");

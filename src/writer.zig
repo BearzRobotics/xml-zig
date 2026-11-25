@@ -394,7 +394,11 @@ pub const Writer = struct {
             self.out.writeAll("/>") catch |e| return werr(e);
             self.in_tag = false;
         } else {
-            try self.closeTag();
+            // Not `closeTag`: the tag was checked above, while its element was still on the stacks.
+            if (self.in_tag) {
+                self.out.writeByte('>') catch |e| return werr(e);
+                self.in_tag = false;
+            }
             // Only after indented children: an empty element stays empty.
             if (layout.indented) try self.newline(self.lens.items.len);
             self.out.writeAll("</") catch |e| return werr(e);
@@ -517,6 +521,39 @@ test "content that would not read back is refused" {
     try w.text("c\r\nd");
     try w.finish();
     try testing.expectEqualStrings("<a k=\"a&#13;&#10;&#9;b\">c&#13;\nd</a>", aw.written());
+}
+
+test "an expanded empty element is checked while it is still open" {
+    // endExpanded used to check the tag after popping it: a root `<a></a>` panicked, and a
+    // child's check looked at the wrong name.
+    const root = try render(.{}, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("a");
+            try w.endExpanded();
+        }
+    }.f);
+    defer testing.allocator.free(root);
+    try testing.expectEqualStrings("<a></a>", root);
+    const child = try render(.{}, struct {
+        fn f(w: *Writer) Error!void {
+            try w.start("averylongrootname:r");
+            try w.attribute("xmlns:averylongrootname", "u");
+            try w.start("c");
+            try w.attribute("xmlns:z", "v");
+            try w.attribute("z:k", "1");
+            try w.endExpanded();
+        }
+    }.f);
+    defer testing.allocator.free(child);
+    try testing.expectEqualStrings("<averylongrootname:r xmlns:averylongrootname=\"u\"><c xmlns:z=\"v\" z:k=\"1\"></c></averylongrootname:r>", child);
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var w = Writer.init(testing.allocator, &aw.writer, .{});
+    defer w.deinit();
+    try w.start("p:a");
+    try testing.expectError(error.UnboundPrefix, w.endExpanded());
+    try w.attribute("xmlns:p", "u");
+    try w.endExpanded();
 }
 
 test "namespaces are held to what the reader accepts" {
