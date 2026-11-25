@@ -230,7 +230,14 @@ pub const Reader = struct {
     /// The next byte of input, or null at the end. Every input byte passes through here and
     /// `tossRaw`, which is what makes `max_input_bytes` exact for every encoding.
     fn peekRaw(self: *Reader) Error!?u8 {
-        const b = if (self.push_len > 0) self.push[0] else blk: {
+        const b = if (self.push_len > 0) self.push[0] else if (self.src.buffer.len == 0) blk: {
+            // An unbuffered source cannot be peeked: read one byte and hold it here.
+            var one: [1]u8 = undefined;
+            if (try self.src.readSliceShort(&one) == 0) return null;
+            self.push[0] = one[0];
+            self.push_len = 1;
+            break :blk one[0];
+        } else blk: {
             const s = self.src.peek(1) catch |e| switch (e) {
                 error.EndOfStream => return null,
                 error.ReadFailed => return error.ReadFailed,

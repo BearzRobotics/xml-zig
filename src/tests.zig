@@ -403,6 +403,17 @@ test "a reader with a tiny buffer still works" {
     try drainReader(&t.interface, .{});
 }
 
+test "an unbuffered source works" {
+    for ([_][]const u8{ sample, "\xFF\xFE<\x00a\x00/\x00>\x00", "<\x00a\x00/\x00>\x00", "\x00<\x00a\x00/\x00>" }) |src| {
+        var t = Trickle.init(&.{}, src, 1, null);
+        try drainReader(&t.interface, .{});
+    }
+    var failing = Trickle.init(&.{}, sample, 1, 10);
+    try testing.expectError(error.ReadFailed, drainReader(&failing.interface, .{}));
+    var none: Io.Reader = .{ .vtable = Io.Reader.failing.vtable, .buffer = &.{}, .seek = 0, .end = 0 };
+    try testing.expectError(error.ReadFailed, drainReader(&none, .{}));
+}
+
 test "random bytes never crash the parser" {
     var prng = std.Random.DefaultPrng.init(0x584d4c);
     const rand = prng.random();
