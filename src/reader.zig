@@ -666,7 +666,10 @@ pub const Reader = struct {
         // `<?` was taken: target, then optional whitespace and data, up to `?>`.
         self.buf.clearRetainingCapacity();
         var c = try self.mustTake();
-        while (!chars.isSpace(c) and c != '?') : (c = try self.mustTake()) try self.append(&self.buf, c);
+        while (!chars.isSpace(c) and c != '?') : (c = try self.mustTake()) {
+            if (self.buf.items.len >= self.options.max_name_bytes) return self.fail(error.LimitExceeded, "a name is longer than the configured limit");
+            try self.append(&self.buf, c);
+        }
         const target_len = self.buf.items.len;
         if (!chars.isName(self.buf.items)) return self.fail(error.InvalidName, "bad processing instruction target");
         if (self.options.namespaces and std.mem.indexOfScalar(u8, self.buf.items, ':') != null) return self.fail(error.InvalidName, "a processing instruction target cannot contain a colon");

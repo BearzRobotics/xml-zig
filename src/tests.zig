@@ -190,6 +190,8 @@ test "limits" {
     try testing.expectError(error.LimitExceeded, drain("<a>0123456789</a>", .{ .max_token_bytes = 5 }));
     try testing.expectError(error.LimitExceeded, drain("<a x='0123456789'/>", .{ .max_token_bytes = 5 }) catch error.LimitExceeded);
     try testing.expectError(error.LimitExceeded, drain("<a>some text here</a>", .{ .max_input_bytes = 8 }));
+    try drain("<a><?abcd x?></a>", .{ .max_name_bytes = 4 });
+    try testing.expectError(error.LimitExceeded, drain("<a><?abcde x?></a>", .{ .max_name_bytes = 4 }));
     // Deeply nested input is refused, not a stack overflow.
     var deep: std.ArrayList(u8) = .empty;
     defer deep.deinit(testing.allocator);
