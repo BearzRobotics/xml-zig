@@ -47,7 +47,7 @@ What is normalized: quote style and spaces inside tags, how a character was writ
 
 ## Errors
 
-A failure returns an error and fills the `Diagnostic` you passed:
+A failure returns an error and fills the `Diagnostic` you passed. `line` and `column` (both `u64`, from 1; columns count bytes) are where the fault is: the offending byte, the start of a bad name or reference, or just past the last byte if the input ends too soon. A reader that has failed stays failed: `next` returns the same error again.
 
 ```zig
 const result = xml.Document.parse(gpa, "<a>\n  <b>\n</a>", .{}, &diag);
@@ -56,7 +56,9 @@ const result = xml.Document.parse(gpa, "<a>\n  <b>\n</a>", .{}, &diag);
 
 ## Limits for untrusted input
 
-`Options` bounds `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_namespace_bindings` (512), `max_token_bytes` (16 MiB), `max_tag_bytes` (32 MiB), `max_namespace_bytes` (1 MiB) and `max_input_bytes` (unlimited). Set `doctype = .reject` for formats that never have a DOCTYPE. Declared entities are never expanded.
+The source may be any `std.Io.Reader`, buffered or not (a buffer makes it much faster).
+
+`Options` bounds `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_namespace_bindings` (512), `max_token_bytes` (16 MiB), `max_tag_bytes` (32 MiB), `max_namespace_bytes` (1 MiB) and `max_input_bytes` (unlimited). `max_input_bytes` counts the bytes of the source, before any decoding. Set `doctype = .reject` for formats that never have a DOCTYPE. Declared entities are never expanded.
 
 ## Write
 

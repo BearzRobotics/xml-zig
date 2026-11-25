@@ -1,6 +1,7 @@
 //! Conformance and robustness tests. Cases come from the XML 1.0 (Fifth
 //! Edition) text, https://www.w3.org/TR/xml/ , with the production they test
-//! named. The W3C XML conformance suite is NOT vendored and has not been run.
+//! named. The W3C XML conformance suite is not vendored; `zig build conformance`
+//! runs it (see bench/conformance.zig).
 
 const std = @import("std");
 const xml = @import("root.zig");

@@ -39,6 +39,20 @@ test "build a tree and look things up by namespace" {
     try testing.expectEqualStrings("Hello", text);
 }
 
+test "write a tree back, with its comments" {
+    const gpa = testing.allocator;
+    const bytes = "<?xml version=\"1.0\"?>\n<!--top-->\n<!DOCTYPE a>\n<a><!--c--><?p d?><![CDATA[<x>]]><b></b><c/></a>\n";
+    var aw: Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    const out = &aw.writer;
+
+    var doc = try xml.Document.parse(gpa, bytes, .{}, null);
+    defer doc.deinit();
+    // ... read or look things up ...
+    try doc.write(gpa, out, .{}); // comments, processing instructions, CDATA, DOCTYPE and the declaration survive
+    try testing.expectEqualStrings(bytes, aw.written());
+}
+
 test "report where a document is broken" {
     var diag: xml.Diagnostic = .{};
     const result = xml.Document.parse(testing.allocator, "<a>\n  <b>\n</a>", .{}, &diag);

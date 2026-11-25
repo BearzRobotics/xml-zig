@@ -34,9 +34,9 @@ all of them, as `toml-zig` and `regex-zig` do for their formats.
 
 ## Consequences
 
-- The reader is a single file of under 800 lines (tests included) and has no state beyond the current token and the open-element stack.
+- The reader is a single file and has no state beyond the current token and the open elements (their names and namespace declarations).
 - Speed is close to Expat's on a 100 MB sample (see `ai/SPEC.md`), measured, not assumed.
-- Conformance is checked against cases written from the specification; the W3C suite has not been run.
+- Conformance is checked against cases written from the specification and, since 0.1.0, the W3C suite (see `ai/SPEC.md`).
 
 ## References
 

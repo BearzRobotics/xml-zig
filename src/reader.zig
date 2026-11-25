@@ -7,7 +7,7 @@
 //!
 //! What is checked: well-formedness (matching tags, one root element, unique
 //! attributes, legal names and characters, valid references), UTF-8, namespace
-//! prefixes. What is deliberately not done (see docs/decisions/0002): entity
+//! prefixes. What is deliberately not done (see docs/decisions/0001): entity
 //! declarations are not expanded, external resources are never fetched, and
 //! documents are not validated against a DTD.
 
@@ -33,7 +33,8 @@ pub const Error = error{
     UndefinedEntity,
     InvalidCharacterReference,
     UnboundPrefix,
-    /// UTF-16, or a declared encoding other than UTF-8 / US-ASCII.
+    /// An encoding other than UTF-8, US-ASCII, UTF-16 and ISO-8859-1, or a declaration that
+    /// contradicts the one detected.
     UnsupportedEncoding,
     UnsupportedVersion,
     /// A `<!DOCTYPE` and `Options.doctype` is `.reject`.
