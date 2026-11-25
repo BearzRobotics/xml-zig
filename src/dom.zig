@@ -120,7 +120,8 @@ pub const ElementIterator = struct {
 pub const Options = struct {
     reader: reader.Options = .{},
     /// Keep comments and processing instructions, inside the root and around it, so that
-    /// `Document.write` writes them back. Set to false to drop them.
+    /// `Document.write` writes them back. Set to false to drop them. (The DOCTYPE and the XML
+    /// declaration are always kept.)
     keep_comments: bool = true,
     /// Drop text nodes that are only whitespace, except where `xml:space="preserve"` is in force.
     /// A run is judged after its pieces are joined. Whitespace written as a reference (`&#32;`)
@@ -187,7 +188,7 @@ pub const Document = struct {
                     standalone = d.standalone;
                     declaration = .{ .version = try a.dupe(u8, d.version), .encoding = if (d.encoding) |e| try a.dupe(u8, e) else null, .standalone = d.standalone };
                 },
-                .doctype => |t| if (options.keep_comments) try before.append(gpa, .{ .doctype = try a.dupe(u8, t) }),
+                .doctype => |t| try before.append(gpa, .{ .doctype = try a.dupe(u8, t) }),
                 .start_element => |s| {
                     var preserve_space = false;
                     if (stack.items.len > 0) {
@@ -375,6 +376,12 @@ test "comments and CDATA are kept by default and can be dropped" {
     try testing.expectEqual(@as(usize, 1), dropped.root.children.len); // x and y merge
     try testing.expectEqualStrings("xy", dropped.root.children[0].text);
     try testing.expectEqual(@as(usize, 0), dropped.prolog.len);
+
+    // The DOCTYPE is not a comment.
+    var typed = try Document.parse(testing.allocator, "<!--c--><!DOCTYPE a><?p?><a/>", .{ .keep_comments = false }, null);
+    defer typed.deinit();
+    try testing.expectEqual(@as(usize, 1), typed.prolog.len);
+    try testing.expectEqualStrings("a", typed.prolog[0].doctype);
 }
 
 fn roundTrip(src: []const u8, options: Document.WriteOptions) ![]u8 {
