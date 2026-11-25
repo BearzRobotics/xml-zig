@@ -405,6 +405,16 @@ test "read and allocation failures fill the diagnostic too" {
     try testing.expectEqual(@as(u32, 2), diag.line);
     try testing.expectEqualStrings("the input could not be read", diag.message);
 
+    // The reader on its own (the tree has a fallback of its own, which would hide a gap here).
+    var no_memory = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var oom: xml.Diagnostic = .{};
+    var source: Io.Reader = .fixed("<a/>");
+    var starved = xml.Reader.init(no_memory.allocator(), &source, .{}, &oom);
+    defer starved.deinit();
+    try testing.expectError(error.OutOfMemory, starved.next());
+    try testing.expectEqualStrings("out of memory", oom.message);
+    try testing.expect(oom.line == 1 and oom.column >= 1);
+
     // Whichever allocation fails, in the reader or in the tree.
     var index: usize = 0;
     while (true) : (index += 1) {
