@@ -566,6 +566,11 @@ test "caller-supplied entities" {
     try testing.expectEqualStrings("ACME <&> Corp", (try rd.next()).start_element.attributes[0].value);
     try testing.expectError(error.UndefinedEntity, drain("<a>&other;</a>", .{ .entities = &entities }));
     try testing.expectError(error.UndefinedEntity, drain("<a>&nbsp;</a>", .{}));
+    // The five predefined entities cannot be redefined.
+    const redefined = [_]xml.Entity{ .{ .name = "lt", .value = "L" }, .{ .name = "gt", .value = "G" }, .{ .name = "amp", .value = "A" }, .{ .name = "quot", .value = "Q" }, .{ .name = "apos", .value = "P" } };
+    const same = try firstText("<a>&lt;&gt;&amp;&quot;&apos;</a>", .{ .entities = &redefined });
+    defer testing.allocator.free(same);
+    try testing.expectEqualStrings("<>&\"'", same);
     // A value is text, never markup: it is checked like any other text.
     const bad = [_]xml.Entity{.{ .name = "ctl", .value = "\x01" }};
     try testing.expectError(error.InvalidCharacter, drain("<a>&ctl;</a>", .{ .entities = &bad }));

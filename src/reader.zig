@@ -71,7 +71,8 @@ pub const Entity = struct {
 };
 
 pub const Options = struct {
-    /// Entities beyond the five predefined ones that the document may use.
+    /// Entities beyond the five predefined ones that the document may use. (An entry that reuses a
+    /// predefined name is ignored.)
     /// Declarations in the document's own DTD are never read (see docs/decisions/0001).
     entities: []const Entity = &.{},
     /// Resolve namespace prefixes (`Name.uri`); an unbound prefix is an error.
@@ -594,12 +595,15 @@ pub const Reader = struct {
             n += 1;
         }
         const s = name[0..n];
-        for (self.options.entities) |e| if (std.mem.eql(u8, e.name, s)) {
-            for (e.value) |x| try self.append(out, x);
-            return;
-        };
-        const rep: u8 = if (std.mem.eql(u8, s, "lt")) '<' else if (std.mem.eql(u8, s, "gt")) '>' else if (std.mem.eql(u8, s, "amp")) '&' else if (std.mem.eql(u8, s, "quot")) '"' else if (std.mem.eql(u8, s, "apos")) '\'' else return self.fail(error.UndefinedEntity, "an entity other than lt, gt, amp, quot, apos");
-        try self.append(out, rep);
+        // The predefined five come first: a caller's table must not change what `&lt;` means.
+        const predefined = [_]Entity{ .{ .name = "lt", .value = "<" }, .{ .name = "gt", .value = ">" }, .{ .name = "amp", .value = "&" }, .{ .name = "quot", .value = "\"" }, .{ .name = "apos", .value = "'" } };
+        for ([_][]const Entity{ &predefined, self.options.entities }) |table| {
+            for (table) |e| if (std.mem.eql(u8, e.name, s)) {
+                for (e.value) |x| try self.append(out, x);
+                return;
+            };
+        }
+        return self.fail(error.UndefinedEntity, "an entity that is neither predefined nor supplied");
     }
 
     fn readText(self: *Reader) Error!Event {
