@@ -15,6 +15,8 @@ pub const Error = error{
     InvalidState,
     /// A comment containing `--`, or a CDATA section containing `]]>`.
     InvalidContent,
+    /// The same attribute twice in one start tag.
+    DuplicateAttribute,
     WriteFailed,
     OutOfMemory,
 };
@@ -34,6 +36,9 @@ pub const Writer = struct {
     lens: std.ArrayList(u32) = .empty,
     /// Whether each open element has had element children and no text (so it may be indented).
     only_elements: std.ArrayList(bool) = .empty,
+    /// The names of the attributes in the open start tag, back to back, with their lengths.
+    attr_names: std.ArrayList(u8) = .empty,
+    attr_lens: std.ArrayList(u32) = .empty,
     /// A start tag is still open (`<a` written, `>` not yet).
     in_tag: bool = false,
     wrote_root: bool = false,
@@ -46,6 +51,8 @@ pub const Writer = struct {
         self.names.deinit(self.gpa);
         self.lens.deinit(self.gpa);
         self.only_elements.deinit(self.gpa);
+        self.attr_names.deinit(self.gpa);
+        self.attr_lens.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -143,6 +150,8 @@ pub const Writer = struct {
         self.lens.appendAssumeCapacity(@intCast(name.len));
         self.only_elements.appendAssumeCapacity(true);
         self.in_tag = true;
+        self.attr_names.clearRetainingCapacity();
+        self.attr_lens.clearRetainingCapacity();
         self.wrote_root = true;
     }
 
@@ -150,6 +159,15 @@ pub const Writer = struct {
         if (!self.in_tag) return error.InvalidState;
         if (!chars.isName(name)) return error.InvalidName;
         if (!chars.validText(value)) return error.InvalidCharacter;
+        var from: usize = 0;
+        for (self.attr_lens.items) |len| {
+            if (std.mem.eql(u8, self.attr_names.items[from..][0..len], name)) return error.DuplicateAttribute;
+            from += len;
+        }
+        try self.attr_names.ensureUnusedCapacity(self.gpa, name.len);
+        try self.attr_lens.ensureUnusedCapacity(self.gpa, 1);
+        self.attr_names.appendSliceAssumeCapacity(name);
+        self.attr_lens.appendAssumeCapacity(@intCast(name.len));
         self.out.writeByte(' ') catch |e| return werr(e);
         self.out.writeAll(name) catch |e| return werr(e);
         self.out.writeAll("=\"") catch |e| return werr(e);
@@ -330,10 +348,18 @@ test "misuse is an error, not bad output" {
     try testing.expectError(error.InvalidState, w.text("x"));
     try testing.expectError(error.InvalidName, w.start("1bad"));
     try w.start("a");
+    try w.attribute("once", "1");
+    try w.attribute("onc", "2");
+    try testing.expectError(error.DuplicateAttribute, w.attribute("once", "3"));
     try testing.expectError(error.InvalidName, w.attribute("a b", "x"));
     try testing.expectError(error.InvalidCharacter, w.attribute("k", "a\x01"));
     try testing.expectError(error.InvalidContent, w.comment("a--b"));
     try testing.expectError(error.InvalidContent, w.cdata("x]]>y"));
+    // A new tag starts with no attributes.
+    try w.start("b");
+    try w.attribute("once", "1");
+    try w.end();
     try w.end();
     try testing.expectError(error.InvalidState, w.start("second_root"));
+    try testing.expectEqualStrings("<a once=\"1\" onc=\"2\"><b once=\"1\"/></a>", aw.written());
 }
