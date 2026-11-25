@@ -356,11 +356,12 @@ const writer_mod = @import("writer.zig");
 
 fn dupName(a: Allocator, n: Name) Allocator.Error!Name {
     const q = try a.dupe(u8, n.qualified);
-    const colon = std.mem.indexOfScalar(u8, q, ':');
+    // `local` is a suffix of the name, as the reader split it (or did not).
+    const local = q[q.len - n.local.len ..];
     return .{
         .qualified = q,
-        .prefix = if (colon) |c| q[0..c] else "",
-        .local = if (colon) |c| q[c + 1 ..] else q,
+        .prefix = if (local.len < q.len) q[0 .. q.len - local.len - 1] else "",
+        .local = local,
         .uri = try a.dupe(u8, n.uri),
     };
 }

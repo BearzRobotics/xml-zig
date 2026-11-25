@@ -94,9 +94,9 @@ pub const Options = struct {
 pub const Name = struct {
     /// The name as written: `w:p`.
     qualified: []const u8,
-    /// Before the colon; empty when there is none.
+    /// Before the colon; empty when there is none (and always when `Options.namespaces` is off).
     prefix: []const u8,
-    /// After the colon (the whole name when there is none).
+    /// After the colon (the whole name when there is none, or `Options.namespaces` is off).
     local: []const u8,
     /// The namespace URI; empty for no namespace (and always when `Options.namespaces` is off).
     uri: []const u8,
@@ -800,8 +800,10 @@ pub const Reader = struct {
         return chars.isName(q[c + 1 ..]);
     }
 
-    fn splitName(q: []const u8) struct { prefix: []const u8, local: []const u8 } {
-        if (std.mem.indexOfScalar(u8, q, ':')) |i| return .{ .prefix = q[0..i], .local = q[i + 1 ..] };
+    /// Splits a QName. Without namespace processing a colon is an ordinary name character, so the
+    /// whole name is the local part.
+    fn splitName(self: *const Reader, q: []const u8) struct { prefix: []const u8, local: []const u8 } {
+        if (self.options.namespaces) if (std.mem.indexOfScalar(u8, q, ':')) |i| return .{ .prefix = q[0..i], .local = q[i + 1 ..] };
         return .{ .prefix = "", .local = q };
     }
 
@@ -860,7 +862,7 @@ pub const Reader = struct {
         const mark = self.ns_binds.items.len;
         if (self.options.namespaces) for (self.raw_attrs.items) |ra| {
             const qn = tag[ra.name.off..][0..ra.name.len];
-            const sp = splitName(qn);
+            const sp = self.splitName(qn);
             const is_default = std.mem.eql(u8, qn, "xmlns");
             if (!is_default and !std.mem.eql(u8, sp.prefix, "xmlns")) continue;
             const pfx: []const u8 = if (is_default) "" else sp.local;
@@ -881,7 +883,7 @@ pub const Reader = struct {
 
         // Build the resolved names.
         self.attrs.clearRetainingCapacity();
-        const e_sp = splitName(ename);
+        const e_sp = self.splitName(ename);
         const e_uri: []const u8 = if (!self.options.namespaces) "" else blk: {
             if (e_sp.prefix.len == 0) break :blk self.lookupPrefix("") orelse "";
             if (std.mem.eql(u8, e_sp.prefix, "xmlns")) return self.fail(error.InvalidName, "an element name cannot use the prefix xmlns");
@@ -889,7 +891,7 @@ pub const Reader = struct {
         };
         for (self.raw_attrs.items) |ra| {
             const qn = tag[ra.name.off..][0..ra.name.len];
-            const sp = splitName(qn);
+            const sp = self.splitName(qn);
             var uri: []const u8 = "";
             if (self.options.namespaces) {
                 if (std.mem.eql(u8, qn, "xmlns")) uri = xmlns_namespace else if (sp.prefix.len > 0) uri = self.lookupPrefix(sp.prefix) orelse return self.fail(error.UnboundPrefix, "an attribute uses a namespace prefix that is not declared");
@@ -921,7 +923,7 @@ pub const Reader = struct {
         try self.last_name.appendSlice(self.gpa, self.names.items[name_start..]);
         // The uri must be resolved before the bindings go away.
         const q = self.last_name.items;
-        const sp = splitName(q);
+        const sp = self.splitName(q);
         var uri: []const u8 = "";
         if (self.options.namespaces) uri = if (sp.prefix.len == 0) (self.lookupPrefix("") orelse "") else (self.lookupPrefix(sp.prefix) orelse "");
         // The uri slice points into ns_bytes; copy it behind the name so it survives the pop.
@@ -937,7 +939,7 @@ pub const Reader = struct {
         if (self.name_lens.items.len == 0) self.state = .epilog;
         const full = self.last_name.items;
         const qn = full[0..uri_off];
-        const sp2 = splitName(qn);
+        const sp2 = self.splitName(qn);
         return .{ .end_element = .{ .name = .{ .qualified = qn, .prefix = sp2.prefix, .local = sp2.local, .uri = full[uri_off..] } } };
     }
 

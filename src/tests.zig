@@ -163,6 +163,25 @@ test "without namespace processing prefixes are only names" {
     try testing.expectError(error.DuplicateAttribute, drain("<a b='1' b='2'/>", .{ .namespaces = false }));
 }
 
+test "without namespace processing a colon is part of the local name" {
+    var doc = try xml.Document.parse(testing.allocator, "<p:r p:x='1' xmlns:p='u'><p:b></p:b></p:r>", .{ .reader = .{ .namespaces = false } }, null);
+    defer doc.deinit();
+    const b = doc.root.children[0].element;
+    for ([_]xml.Name{ doc.root.name, b.name }) |n| {
+        try testing.expectEqualStrings(n.qualified, n.local);
+        try testing.expectEqualStrings("", n.prefix);
+        try testing.expectEqualStrings("", n.uri);
+    }
+    try testing.expect(doc.root.attrNs("", "x") == null);
+    try testing.expectEqualStrings("1", doc.root.attrNs("", "p:x").?);
+    try testing.expect(doc.root.childNs("", "b") == null);
+    var r: Io.Reader = .fixed("<p:a></p:a>");
+    var rd = xml.Reader.init(testing.allocator, &r, .{ .namespaces = false }, null);
+    defer rd.deinit();
+    _ = try rd.next();
+    try testing.expectEqualStrings("p:a", (try rd.next()).end_element.name.local);
+}
+
 test "DOCTYPE can be refused" {
     try testing.expectError(error.DoctypeNotAllowed, drain("<!DOCTYPE a><a/>", .{ .doctype = .reject }));
     try drain("<a/>", .{ .doctype = .reject });
