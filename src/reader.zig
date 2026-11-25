@@ -280,7 +280,16 @@ pub const Reader = struct {
 
     /// The next byte of input, or null at the end. Every input byte passes through here and
     /// `tossRaw`, which is what makes `max_input_bytes` exact for every encoding.
-    fn peekRaw(self: *Reader) Error!?u8 {
+    /// This runs for every byte, so only the usual case is here; keep it small enough to inline.
+    inline fn peekRaw(self: *Reader) Error!?u8 {
+        const ready = self.src.buffered();
+        if (self.push_len == 0 and ready.len > 0 and self.options.max_input_bytes == 0) return ready[0];
+        return self.peekRawSlow();
+    }
+
+    /// `peekRaw` when the source must be refilled or cannot be peeked, a byte was put back, or a
+    /// limit applies.
+    noinline fn peekRawSlow(self: *Reader) Error!?u8 {
         const b = if (self.push_len > 0) self.push[0] else if (self.src.buffer.len == 0) blk: {
             // An unbuffered source cannot be peeked: read one byte and hold it here.
             var one: [1]u8 = undefined;
@@ -300,7 +309,7 @@ pub const Reader = struct {
         return b;
     }
 
-    fn tossRaw(self: *Reader) void {
+    inline fn tossRaw(self: *Reader) void {
         self.consumed += 1;
         if (self.push_len > 0) {
             self.push_len -= 1;
@@ -348,7 +357,7 @@ pub const Reader = struct {
         return if (self.enc == .utf16le) @as(u16, b1) << 8 | b0 else @as(u16, b0) << 8 | b1;
     }
 
-    fn peekByte(self: *Reader) Error!?u8 {
+    inline fn peekByte(self: *Reader) Error!?u8 {
         if (self.enc == .utf8) return self.peekRaw();
         if (self.pend_pos >= self.pend_len) {
             if (!try self.decodeNext()) return null;
@@ -356,12 +365,12 @@ pub const Reader = struct {
         return self.pend[self.pend_pos];
     }
 
-    fn tossByte(self: *Reader) void {
+    inline fn tossByte(self: *Reader) void {
         if (self.enc == .utf8) self.tossRaw() else self.pend_pos += 1;
     }
 
     /// The next byte with line ends normalized (`\r\n` and `\r` become `\n`), or null at the end.
-    fn takeByte(self: *Reader) Error!?u8 {
+    inline fn takeByte(self: *Reader) Error!?u8 {
         var b = (try self.peekByte()) orelse return null;
         const at: Mark = .{ .line = self.line, .col = self.col };
         self.tossByte();
