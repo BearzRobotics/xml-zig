@@ -222,7 +222,7 @@ test "limits" {
     try testing.expectError(error.LimitExceeded, drain("<abcdefgh/>", .{ .max_name_bytes = 4 }));
     try testing.expectError(error.LimitExceeded, drain("<a x='1' y='2' z='3'/>", .{ .max_attributes = 2 }));
     try testing.expectError(error.LimitExceeded, drain("<a>0123456789</a>", .{ .max_token_bytes = 5 }));
-    try testing.expectError(error.LimitExceeded, drain("<a x='0123456789'/>", .{ .max_token_bytes = 5 }) catch error.LimitExceeded);
+    try testing.expectError(error.LimitExceeded, drain("<a x='0123456789'/>", .{ .max_token_bytes = 5 }));
     try testing.expectError(error.LimitExceeded, drain("<a>some text here</a>", .{ .max_input_bytes = 8 }));
     try drain("<a><?abcd x?></a>", .{ .max_name_bytes = 4 });
     try testing.expectError(error.LimitExceeded, drain("<a><?abcde x?></a>", .{ .max_name_bytes = 4 }));
