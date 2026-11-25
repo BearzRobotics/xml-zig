@@ -5,6 +5,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const chars = @import("chars.zig");
+const doctype_syntax = @import("doctype.zig");
 
 pub const Error = error{
     /// A name that is not a valid XML name.
@@ -126,7 +127,8 @@ pub const Writer = struct {
     pub fn doctype(self: *Writer, raw: []const u8) Error!void {
         if (self.wrote_root or self.wrote_doctype) return error.InvalidState;
         if (!chars.validText(raw)) return error.InvalidCharacter;
-        if (hasCr(raw)) return error.InvalidContent;
+        // As strict as the reader: anything else could end the declaration early and add markup.
+        if (hasCr(raw) or doctype_syntax.check(raw) != null) return error.InvalidContent;
         self.wrote_doctype = true;
         self.wrote_any = true;
         self.out.writeAll("<!DOCTYPE ") catch |e| return werr(e);
@@ -364,6 +366,9 @@ test "content that would not read back is refused" {
     var w = Writer.init(testing.allocator, &aw.writer, .{});
     defer w.deinit();
     try testing.expectError(error.InvalidContent, w.doctype("a [\r\n]"));
+    for ([_][]const u8{ "", "a><evil/", "a><evil attr='1'/><!--", "a [ ] ><b", "a>", "a [", "a SYSTEM \"x" }) |raw|
+        try testing.expectError(error.InvalidContent, w.doctype(raw));
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
     try w.start("a");
     const before = aw.written().len;
     for ([_][]const u8{ "a--b", "a-", "-", "a\rb" }) |s| try testing.expectError(error.InvalidContent, w.comment(s));
