@@ -353,7 +353,13 @@ pub const Reader = struct {
     }
 
     fn append(self: *Reader, list: *std.ArrayList(u8), b: u8) Error!void {
-        if (list.items.len >= self.options.max_token_bytes) return self.fail(error.LimitExceeded, "a token is longer than the configured limit");
+        return self.appendWithRoom(list, b, 0);
+    }
+
+    /// `append` for a token collected together with `extra` bytes of its terminator, which are
+    /// trimmed off afterwards and do not count towards the limit.
+    fn appendWithRoom(self: *Reader, list: *std.ArrayList(u8), b: u8, extra: u2) Error!void {
+        if (list.items.len >= @as(u64, self.options.max_token_bytes) + extra) return self.fail(error.LimitExceeded, "a token is longer than the configured limit");
         try list.append(self.gpa, b);
     }
 
@@ -638,7 +644,7 @@ pub const Reader = struct {
                 self.buf.items.len -= 2;
                 break;
             }
-            try self.append(&self.buf, b);
+            try self.appendWithRoom(&self.buf, b, 2);
         }
         if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .cdata = self.buf.items };
@@ -656,7 +662,7 @@ pub const Reader = struct {
                 self.buf.items.len -= 1;
                 break;
             }
-            try self.append(&self.buf, b);
+            try self.appendWithRoom(&self.buf, b, 1);
         }
         if (!chars.validText(self.buf.items)) return self.fail(error.InvalidCharacter, "invalid UTF-8 or a character XML does not allow");
         return .{ .comment = self.buf.items };

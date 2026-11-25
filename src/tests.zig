@@ -192,6 +192,20 @@ test "limits" {
     try testing.expectError(error.LimitExceeded, drain("<a>some text here</a>", .{ .max_input_bytes = 8 }));
     try drain("<a><?abcd x?></a>", .{ .max_name_bytes = 4 });
     try testing.expectError(error.LimitExceeded, drain("<a><?abcde x?></a>", .{ .max_name_bytes = 4 }));
+    // Each kind of token gets exactly max_token_bytes of content, even content that looks
+    // like the start of its terminator.
+    for ([_][2][]const u8{ .{ "<a>", "</a>" }, .{ "<a><!--", "--></a>" }, .{ "<a><![CDATA[", "]]></a>" }, .{ "<a b='", "'/>" } }) |around| {
+        var src_buf: [64]u8 = undefined;
+        for ([_][]const u8{ "0123456789", "01234567]]", "012345678]" }) |ten| {
+            if (std.mem.endsWith(u8, around[0], "CDATA[") and std.mem.endsWith(u8, ten, "]")) continue;
+            try drain(try std.fmt.bufPrint(&src_buf, "{s}{s}{s}", .{ around[0], ten, around[1] }), .{ .max_token_bytes = 10 });
+        }
+        const eleven = try std.fmt.bufPrint(&src_buf, "{s}0123456789x{s}", .{ around[0], around[1] });
+        try testing.expectError(error.LimitExceeded, drain(eleven, .{ .max_token_bytes = 10 }));
+    }
+    // A processing instruction's target and data share the limit.
+    try drain("<a><?p 012345678?></a>", .{ .max_token_bytes = 10 });
+    try testing.expectError(error.LimitExceeded, drain("<a><?p 0123456789?></a>", .{ .max_token_bytes = 10 }));
     // Deeply nested input is refused, not a stack overflow.
     var deep: std.ArrayList(u8) = .empty;
     defer deep.deinit(testing.allocator);
