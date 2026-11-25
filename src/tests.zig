@@ -240,6 +240,11 @@ test "limits" {
     // A processing instruction's target and data share the limit.
     try drain("<a><?p 012345678?></a>", .{ .max_token_bytes = 10 });
     try testing.expectError(error.LimitExceeded, drain("<a><?p 0123456789?></a>", .{ .max_token_bytes = 10 }));
+    // Namespace declarations in scope are counted over all open elements, and released again.
+    const two: xml.Options = .{ .max_namespace_bindings = 2 };
+    try drain("<a xmlns:p='u'><b xmlns:q='v'/><c xmlns:r='w'/></a>", two);
+    try testing.expectError(error.LimitExceeded, drain("<a xmlns:p='u'><b xmlns:q='v'><c xmlns='w'/></b></a>", two));
+    try drain("<a xmlns:p='u' xmlns:q='v' xmlns:r='w'/>", .{ .max_namespace_bindings = 2, .namespaces = false });
     // Deeply nested input is refused, not a stack overflow.
     var deep: std.ArrayList(u8) = .empty;
     defer deep.deinit(testing.allocator);

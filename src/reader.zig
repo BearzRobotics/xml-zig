@@ -84,6 +84,9 @@ pub const Options = struct {
     /// Longest element or attribute name, in bytes.
     max_name_bytes: u32 = 1024,
     max_attributes: u32 = 256,
+    /// Most namespace declarations in scope at once, over all open elements. Each prefixed or
+    /// unprefixed name is looked up among them, so this bounds the work per element.
+    max_namespace_bindings: u32 = 512,
     /// Largest single text run, attribute value, comment, CDATA section,
     /// processing instruction or DOCTYPE, in bytes.
     max_token_bytes: u32 = 16 * 1024 * 1024,
@@ -881,6 +884,7 @@ pub const Reader = struct {
             if (std.mem.eql(u8, pfx, "xml") and !std.mem.eql(u8, uri, xml_namespace)) return self.fail(error.InvalidSyntax, "the xml prefix can only be bound to the XML namespace");
             if (std.mem.eql(u8, uri, xml_namespace) and !std.mem.eql(u8, pfx, "xml")) return self.fail(error.InvalidSyntax, "the XML namespace can only be bound to the xml prefix");
             if (std.mem.eql(u8, uri, xmlns_namespace)) return self.fail(error.InvalidSyntax, "the xmlns namespace cannot be bound");
+            if (self.ns_binds.items.len >= self.options.max_namespace_bindings) return self.fail(error.LimitExceeded, "more namespace declarations in scope than the configured limit");
             const po: u32 = @intCast(self.ns_bytes.items.len);
             try self.ns_bytes.appendSlice(self.gpa, pfx);
             const uo: u32 = @intCast(self.ns_bytes.items.len);

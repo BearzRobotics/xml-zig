@@ -16,7 +16,7 @@ A streaming XML parser built on `std.Io`, a small tree (`Document`) built on top
 
 Events: `xml_decl` (version, encoding, standalone), `start_element` (name, attributes, empty), `end_element` (name), `text`, `cdata`, `comment`, `processing_instruction` (target, data), `doctype`, `end_of_document`. Strings are borrowed until the next call to `next`.
 
-Options: `entities` (extra `&name;` replacements supplied by the caller), `namespaces` (true), `doctype` (`.skip` or `.reject`), `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_token_bytes` (16 MiB), `max_input_bytes` (0 = unlimited).
+Options: `entities` (extra `&name;` replacements supplied by the caller), `namespaces` (true), `doctype` (`.skip` or `.reject`), `max_depth` (256), `max_name_bytes` (1024), `max_attributes` (256), `max_namespace_bindings` (512), `max_token_bytes` (16 MiB), `max_input_bytes` (0 = unlimited).
 
 Errors: `InvalidSyntax`, `InvalidName`, `InvalidCharacter`, `UnexpectedEof`, `MismatchedTag`, `DuplicateAttribute`, `UndefinedEntity`, `InvalidCharacterReference`, `UnboundPrefix`, `UnsupportedEncoding` (anything but UTF-8, US-ASCII, UTF-16, ISO-8859-1), `UnsupportedVersion` (1.1), `DoctypeNotAllowed`, `LimitExceeded`, `ReadFailed`, `OutOfMemory`. `Diagnostic` holds `line`, `column` and `message`.
 
