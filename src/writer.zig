@@ -42,6 +42,9 @@ pub const Writer = struct {
     /// A start tag is still open (`<a` written, `>` not yet).
     in_tag: bool = false,
     wrote_root: bool = false,
+    wrote_doctype: bool = false,
+    /// Anything at all has been written: too late for an XML declaration.
+    wrote_any: bool = false,
 
     pub fn init(gpa: Allocator, out: *Io.Writer, options: Options) Writer {
         return .{ .gpa = gpa, .out = out, .options = options };
@@ -70,9 +73,11 @@ pub const Writer = struct {
     /// An XML declaration with the given pseudo-attributes, and a newline. Note the writer always
     /// writes UTF-8: an `encoding` other than UTF-8 would be a lie, so it is refused.
     pub fn declarationWith(self: *Writer, version: []const u8, encoding: ?[]const u8, standalone: ?bool) Error!void {
-        if (self.wrote_root or self.lens.items.len > 0) return error.InvalidState;
+        if (self.wrote_any) return error.InvalidState;
+        if (std.mem.eql(u8, version, "1.1")) return error.InvalidContent; // not XML 1.0, and not readable here
         if (version.len < 3 or !std.mem.startsWith(u8, version, "1.")) return error.InvalidContent;
         for (version[2..]) |c| if (!std.ascii.isDigit(c)) return error.InvalidContent;
+        self.wrote_any = true;
         self.out.writeAll("<?xml version=\"") catch |e| return werr(e);
         self.out.writeAll(version) catch |e| return werr(e);
         self.out.writeByte('"') catch |e| return werr(e);
@@ -90,6 +95,7 @@ pub const Writer = struct {
         if (std.mem.indexOf(u8, data, "?>") != null) return error.InvalidContent;
         try self.closeTag();
         try self.indentMarkup();
+        self.wrote_any = true;
         self.out.writeAll("<?") catch |e| return werr(e);
         self.out.writeAll(target) catch |e| return werr(e);
         if (data.len > 0) {
@@ -107,8 +113,10 @@ pub const Writer = struct {
 
     /// A DOCTYPE, written as read (`raw` is the text between `<!DOCTYPE` and `>`). Only before the root.
     pub fn doctype(self: *Writer, raw: []const u8) Error!void {
-        if (self.wrote_root or self.lens.items.len > 0) return error.InvalidState;
+        if (self.wrote_root or self.wrote_doctype) return error.InvalidState;
         if (!chars.validText(raw)) return error.InvalidCharacter;
+        self.wrote_doctype = true;
+        self.wrote_any = true;
         self.out.writeAll("<!DOCTYPE ") catch |e| return werr(e);
         self.out.writeAll(raw) catch |e| return werr(e);
         self.out.writeAll(">") catch |e| return werr(e);
@@ -117,6 +125,7 @@ pub const Writer = struct {
     /// A line break between items outside the root element (after the declaration, comments and so on).
     pub fn lineBreak(self: *Writer) Error!void {
         if (self.lens.items.len > 0) return error.InvalidState;
+        self.wrote_any = true;
         self.out.writeByte('\n') catch |e| return werr(e);
     }
 
@@ -150,6 +159,7 @@ pub const Writer = struct {
         self.lens.appendAssumeCapacity(@intCast(name.len));
         self.only_elements.appendAssumeCapacity(true);
         self.in_tag = true;
+        self.wrote_any = true;
         self.attr_names.clearRetainingCapacity();
         self.attr_lens.clearRetainingCapacity();
         self.wrote_root = true;
@@ -222,6 +232,7 @@ pub const Writer = struct {
         if (std.mem.indexOf(u8, s, "--") != null or std.mem.endsWith(u8, s, "-")) return error.InvalidContent;
         try self.closeTag();
         try self.indentMarkup();
+        self.wrote_any = true;
         self.out.writeAll("<!--") catch |e| return werr(e);
         self.out.writeAll(s) catch |e| return werr(e);
         self.out.writeAll("-->") catch |e| return werr(e);
@@ -333,6 +344,45 @@ fn writeNested(gpa: Allocator) !void {
         while (try rd.next() != .end_of_document) {}
     }
     if (failed) |e| return e;
+}
+
+test "the prolog cannot be written out of order" {
+    const Step = enum { declaration, comment, pi, doctype, line_break, root };
+    const apply = struct {
+        fn f(w: *Writer, s: Step) Error!void {
+            switch (s) {
+                .declaration => try w.declaration(),
+                .comment => try w.comment("c"),
+                .pi => try w.processingInstruction("p", ""),
+                .doctype => try w.doctype("a"),
+                .line_break => try w.lineBreak(),
+                .root => try w.start("a"),
+            }
+        }
+    }.f;
+    const refused = [_][2]Step{
+        .{ .declaration, .declaration }, .{ .comment, .declaration },    .{ .pi, .declaration },
+        .{ .doctype, .declaration },     .{ .line_break, .declaration }, .{ .root, .declaration },
+        .{ .doctype, .doctype },         .{ .root, .doctype },
+    };
+    for (refused) |pair| {
+        var aw: Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        var w = Writer.init(testing.allocator, &aw.writer, .{});
+        defer w.deinit();
+        try apply(&w, pair[0]);
+        const before = aw.written().len;
+        try testing.expectError(error.InvalidState, apply(&w, pair[1]));
+        try testing.expectEqual(before, aw.written().len);
+    }
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var w = Writer.init(testing.allocator, &aw.writer, .{});
+    defer w.deinit();
+    for ([_][]const u8{ "1.1", "2.0", "1.", "1.x", "" }) |version|
+        try testing.expectError(error.InvalidContent, w.declarationWith(version, null, null));
+    try w.declarationWith("1.7", null, false);
+    for ([_]Step{ .comment, .line_break, .doctype, .pi, .root }) |s| try apply(&w, s);
 }
 
 test "the writer survives any failed allocation" {
