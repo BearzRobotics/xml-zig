@@ -70,8 +70,9 @@ pub const Writer = struct {
         return self.declarationWith("1.0", "UTF-8", null);
     }
 
-    /// An XML declaration with the given pseudo-attributes, and a newline. Note the writer always
-    /// writes UTF-8: an `encoding` other than UTF-8 would be a lie, so it is refused.
+    /// An XML declaration with the given pseudo-attributes, and a newline. The writer always
+    /// writes UTF-8, so any `encoding` given is written as `UTF-8`; null leaves it out. (This is
+    /// what lets a document read as UTF-16 or ISO-8859-1 be written back.)
     pub fn declarationWith(self: *Writer, version: []const u8, encoding: ?[]const u8, standalone: ?bool) Error!void {
         if (self.wrote_any) return error.InvalidState;
         if (std.mem.eql(u8, version, "1.1")) return error.InvalidContent; // not XML 1.0, and not readable here
@@ -381,7 +382,8 @@ test "the prolog cannot be written out of order" {
     defer w.deinit();
     for ([_][]const u8{ "1.1", "2.0", "1.", "1.x", "" }) |version|
         try testing.expectError(error.InvalidContent, w.declarationWith(version, null, null));
-    try w.declarationWith("1.7", null, false);
+    try w.declarationWith("1.7", "ISO-8859-1", false);
+    try testing.expectEqualStrings("<?xml version=\"1.7\" encoding=\"UTF-8\" standalone=\"no\"?>\n", aw.written());
     for ([_]Step{ .comment, .line_break, .doctype, .pi, .root }) |s| try apply(&w, s);
 }
 
