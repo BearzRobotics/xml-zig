@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const test_step = b.step("test", "Run unit and conformance tests");
+    const test_step = b.step("test", "Run the tests, and check that the programs compile");
     const unit = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(unit).step);
 
@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     const cli_exe = b.addExecutable(.{ .name = "xml-parse", .root_module = cli_mod });
     const cli_step = b.step("cli", "Build zig-out/bin/xml-parse");
     cli_step.dependOn(&b.addInstallArtifact(cli_exe, .{}).step);
+    test_step.dependOn(&cli_exe.step);
 
     // The W3C conformance suite (fetched separately; see scripts/fetch-conformance.sh).
     const conf_mod = b.createModule(.{
@@ -51,6 +52,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "xml", .module = mod }},
     });
     const conf_exe = b.addExecutable(.{ .name = "xml-conformance", .root_module = conf_mod });
+    // Running the suite needs a download, so `test` only makes sure the runner still builds.
+    test_step.dependOn(&conf_exe.step);
     const conf_run = b.addRunArtifact(conf_exe);
     if (b.option([]const u8, "suite", "Path of the unpacked suite xmlconf directory")) |dir| conf_run.addArg(dir);
     const conf_step = b.step("conformance", "Run the W3C XML conformance suite (zig build conformance -Dsuite=DIR/xmlconf)");
