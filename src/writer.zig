@@ -130,14 +130,18 @@ pub const Writer = struct {
     pub fn start(self: *Writer, name: []const u8) Error!void {
         if (!chars.isName(name)) return error.InvalidName;
         if (self.lens.items.len == 0 and self.wrote_root) return error.InvalidState;
+        // Make room first: once `<name` is written the stacks must record it, whatever fails.
+        try self.names.ensureUnusedCapacity(self.gpa, name.len);
+        try self.lens.ensureUnusedCapacity(self.gpa, 1);
+        try self.only_elements.ensureUnusedCapacity(self.gpa, 1);
         try self.closeTag();
         const depth = self.lens.items.len;
         if (depth > 0 and self.only_elements.items[depth - 1]) try self.newline(depth);
         self.out.writeByte('<') catch |e| return werr(e);
         self.out.writeAll(name) catch |e| return werr(e);
-        try self.names.appendSlice(self.gpa, name);
-        try self.lens.append(self.gpa, @intCast(name.len));
-        try self.only_elements.append(self.gpa, true);
+        self.names.appendSliceAssumeCapacity(name);
+        self.lens.appendAssumeCapacity(@intCast(name.len));
+        self.only_elements.appendAssumeCapacity(true);
         self.in_tag = true;
         self.wrote_root = true;
     }
@@ -283,6 +287,38 @@ test "indentation leaves text alone" {
     }.f);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("<a>\n  <b>t</b>\n  <c>\n    <d/>\n  </c>\n</a>\n", out);
+}
+
+fn writeNested(gpa: Allocator) !void {
+    var out_buf: [16 * 1024]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buf);
+    var w = Writer.init(gpa, &out, .{ .indent = 1 });
+    defer w.deinit();
+    // Names long and deep enough that every one of the writer's lists has to grow more than once.
+    const long: []const u8 = &@as([40]u8, @splat('n'));
+    var failed: ?Error = null;
+    for (0..40) |_| w.start(long) catch |e| {
+        failed = e;
+        break;
+    };
+    w.attribute("k", "v") catch |e| {
+        failed = failed orelse e;
+    };
+    // Whatever failed, the writer is still consistent: closing it gives a complete document.
+    if (w.lens.items.len > 0) {
+        try w.finish();
+        const doc_len = out.buffered().len;
+        try testing.expect(std.mem.startsWith(u8, out.buffered()[0..doc_len], "<nnnn"));
+        var src: Io.Reader = .fixed(out.buffered());
+        var rd = @import("reader.zig").Reader.init(testing.allocator, &src, .{}, null);
+        defer rd.deinit();
+        while (try rd.next() != .end_of_document) {}
+    }
+    if (failed) |e| return e;
+}
+
+test "the writer survives any failed allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, writeNested, .{});
 }
 
 test "misuse is an error, not bad output" {
