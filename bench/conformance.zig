@@ -32,6 +32,9 @@ const catalogs = [_][]const u8{
     "eduni/namespaces/errata-1e/errata1e.xml", "eduni/misc/ht-bh.xml",
 };
 
+/// Tests in each catalog of xmlts20130923, in the order above.
+const catalog_sizes = [catalogs.len]u32{ 365, 12, 28, 74, 56, 1, 348, 48, 731, 149, 34, 13, 393, 48, 3, 9 };
+
 /// Whether the catalog being run is a Namespaces test (names with colons are then QNames).
 var namespaces = false;
 
@@ -55,14 +58,17 @@ pub fn main(init: std.process.Init) !void {
     var totals: [6]u32 = @splat(0);
     var fails: std.ArrayList(u8) = .empty;
     defer fails.deinit(gpa);
+    // A run that could not load its tests must not look like a run that passed them.
+    var broken_catalogs: u32 = 0;
 
-    for (catalogs) |cat| {
+    for (catalogs, catalog_sizes) |cat, size| {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const a = arena.allocator();
         const path = try std.fs.path.join(a, &.{ root, cat });
         const bytes = readFile(a, io, path) catch |e| {
             try w.print("cannot read catalog {s}: {s}\n", .{ path, @errorName(e) });
+            broken_catalogs += 1;
             continue;
         };
         // Some catalogs are fragments with several roots: wrap them.
@@ -74,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
         var diag: xml.Diagnostic = .{};
         var doc = xml.Document.parse(gpa, wrapped, .{ .reader = .{ .namespaces = false } }, &diag) catch |e| {
             try w.print("catalog {s} is not parsed: {s} ({f})\n", .{ cat, @errorName(e), diag });
+            broken_catalogs += 1;
             continue;
         };
         defer doc.deinit();
@@ -81,12 +88,20 @@ pub fn main(init: std.process.Init) !void {
         namespaces = std.mem.indexOf(u8, cat, "namespaces/") != null;
         try walk(a, io, gpa, root, doc.root, std.fs.path.dirname(cat) orelse "", &counts, &fails);
         try w.print("{s}: pass {d}, FAIL {d}, uses-entities {d}, dtd-syntax {d}, skipped {d}, encoding {d}\n", .{ cat, counts[0], counts[1], counts[2], counts[5], counts[3], counts[4] });
+        var ran: u32 = 0;
+        for (counts) |c| ran += c;
+        if (ran != size) {
+            try w.print("catalog {s}: found {d} tests, expected {d}\n", .{ cat, ran, size });
+            broken_catalogs += 1;
+        }
         for (&totals, counts) |*t, c| t.* += c;
     }
     try w.print("\nTOTAL: pass {d}, FAIL {d}, uses-entities {d}, dtd-syntax {d}, skipped {d}, encoding {d}\n", .{ totals[0], totals[1], totals[2], totals[5], totals[3], totals[4] });
     if (fails.items.len > 0) try w.print("\nFailures:\n{s}", .{fails.items});
     try w.flush();
-    if (totals[1] > 0) std.process.exit(1);
+    if (broken_catalogs > 0) try w.print("\n{d} catalog(s) missing, unreadable or incomplete\n", .{broken_catalogs});
+    try w.flush();
+    if (totals[1] > 0 or broken_catalogs > 0) std.process.exit(1);
 }
 
 fn readFile(a: Allocator, io: Io, path: []const u8) ![]u8 {
