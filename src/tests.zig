@@ -262,6 +262,33 @@ test "the reader survives any failed allocation, without leaking" {
         try testing.checkAllAllocationFailures(testing.allocator, drainTwice, .{src});
 }
 
+test "read and allocation failures fill the diagnostic too" {
+    var buf: [8]u8 = undefined;
+    var t = Trickle.init(&buf, "<a>\n<b/></a>", 1, 6);
+    var diag: xml.Diagnostic = .{};
+    var rd = xml.Reader.init(testing.allocator, &t.interface, .{}, &diag);
+    defer rd.deinit();
+    while (true) _ = rd.next() catch break;
+    try testing.expectEqual(@as(u32, 2), diag.line);
+    try testing.expectEqualStrings("the input could not be read", diag.message);
+
+    // Whichever allocation fails, in the reader or in the tree.
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        var d: xml.Diagnostic = .{};
+        var doc = xml.Document.parse(failing.allocator(), "<a x='1'><b>t</b></a>", .{}, &d) catch |e| {
+            try testing.expectEqual(error.OutOfMemory, e);
+            try testing.expectEqualStrings("out of memory", d.message);
+            try testing.expect(d.line >= 1 and d.column >= 1);
+            continue;
+        };
+        doc.deinit();
+        break;
+    }
+    try testing.expect(index > 3);
+}
+
 /// A Reader that hands out `chunk` bytes at a time and can fail part-way.
 const Trickle = struct {
     data: []const u8,

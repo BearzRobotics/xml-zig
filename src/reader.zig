@@ -185,6 +185,8 @@ pub const Reader = struct {
     /// The error that stopped the reader. A failed reader stays failed: its stacks may be
     /// half-updated, so carrying on would give wrong events or worse.
     failure: ?Error = null,
+    /// Whether the diagnostic has been filled for this reader's error.
+    diagnosed: bool = false,
 
     pub fn init(gpa: Allocator, src: *Io.Reader, options: Options, diag: ?*Diagnostic) Reader {
         return .{ .gpa = gpa, .src = src, .options = options, .diag = diag };
@@ -212,8 +214,14 @@ pub const Reader = struct {
     // ------------------------------------------------------------ errors
 
     fn fail(self: *Reader, err: Error, message: []const u8) Error {
-        if (self.diag) |d| d.* = .{ .line = self.line, .column = self.col, .message = message };
+        self.diagnose(message);
         return err;
+    }
+
+    /// Fills the caller's diagnostic with the current position and `message`.
+    pub fn diagnose(self: *Reader, message: []const u8) void {
+        self.diagnosed = true;
+        if (self.diag) |d| d.* = .{ .line = self.line, .column = self.col, .message = message };
     }
 
     // ------------------------------------------------------- byte access
@@ -332,6 +340,12 @@ pub const Reader = struct {
         if (self.failure) |e| return e;
         const ev = self.nextEvent() catch |e| {
             self.failure = e;
+            // Parse errors describe themselves where they are found; these two come from below.
+            if (!self.diagnosed) switch (e) {
+                error.ReadFailed => self.diagnose("the input could not be read"),
+                error.OutOfMemory => self.diagnose("out of memory"),
+                else => self.diagnose(@errorName(e)),
+            };
             return e;
         };
         self.first_token = false;

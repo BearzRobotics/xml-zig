@@ -176,6 +176,9 @@ pub const Document = struct {
         const a = arena.allocator();
         var rd = reader.Reader.init(gpa, src, options.reader, diag);
         defer rd.deinit();
+        // The tree's own allocations can fail too, outside the reader. Nothing else here fails
+        // without the reader having described it.
+        errdefer if (!rd.diagnosed) rd.diagnose("out of memory");
 
         // One open element at a time: a stack of (element, children so far).
         const Frame = struct { el: *Element, kids: std.ArrayList(Node), preserve_space: bool };
