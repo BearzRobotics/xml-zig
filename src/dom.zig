@@ -606,6 +606,20 @@ test "no leaks however much is outside the root" {
     }
 }
 
+fn writeParsed(gpa: Allocator, doc: *const Document, indent: u8) !void {
+    var out_buf: [64 * 1024]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buf);
+    try doc.write(gpa, &out, .{ .indent = indent });
+}
+
+test "no leaks when any allocation of a write fails" {
+    // Deep and wide enough that the walk and each of the writer's lists have to grow.
+    const deep = "<a xmlns:p='u'><p:b x='1' xmlns:q='v'><c><d><e><f><g><h><i><j><k><l>t</l></k></j></i></h></g></f></e></d></c></p:b></a>";
+    var doc = try Document.parse(testing.allocator, deep, .{}, null);
+    defer doc.deinit();
+    for ([_]u8{ 0, 2 }) |indent| try testing.checkAllAllocationFailures(testing.allocator, writeParsed, .{ &doc, indent });
+}
+
 test "no leaks when any allocation of a parse fails" {
     const many = try repeated(testing.allocator, 40, 40);
     defer testing.allocator.free(many);
