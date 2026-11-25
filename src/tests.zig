@@ -230,6 +230,38 @@ test "namespaces resolve through nested scopes and unwind" {
     try testing.expect(try rd.next() == .end_of_document);
 }
 
+test "a failed reader stays failed" {
+    // Each of these fails with the element half set up; reading on used to panic.
+    for ([_][]const u8{ "<a xmlns:p=''><b></b></a>", "<p:a><b></b></p:a>", "<a x='1' x='2'><b/></a>" }) |src| {
+        var r: Io.Reader = .fixed(src);
+        var rd = xml.Reader.init(testing.allocator, &r, .{}, null);
+        defer rd.deinit();
+        const first: xml.Error = while (true) {
+            _ = rd.next() catch |e| break e;
+        };
+        for (0..8) |_| try testing.expectError(first, rd.next());
+    }
+}
+
+fn drainTwice(gpa: std.mem.Allocator, src: []const u8) !void {
+    var r: Io.Reader = .fixed(src);
+    var rd = xml.Reader.init(gpa, &r, .{}, null);
+    defer rd.deinit();
+    while (true) {
+        const ev = rd.next() catch |e| {
+            try testing.expectError(e, rd.next());
+            return e;
+        };
+        if (ev == .end_of_document) return;
+    }
+}
+
+test "the reader survives any failed allocation, without leaking" {
+    const entities_and_namespaces = "<?xml version='1.0'?><!DOCTYPE r><r xmlns='urn:d' xmlns:p='urn:p' a='1 &amp; 2'><p:b p:c='3' xmlns:q='urn:q'><q:d/>text &#65;<![CDATA[x]]><!--c--><?pi d?></p:b></r>";
+    for ([_][]const u8{ sample, entities_and_namespaces }) |src|
+        try testing.checkAllAllocationFailures(testing.allocator, drainTwice, .{src});
+}
+
 /// A Reader that hands out `chunk` bytes at a time and can fail part-way.
 const Trickle = struct {
     data: []const u8,

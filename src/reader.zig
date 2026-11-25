@@ -182,6 +182,9 @@ pub const Reader = struct {
     doctype_seen: bool = false,
     /// No event has been produced yet and no whitespace consumed: an XML declaration is still allowed.
     first_token: bool = true,
+    /// The error that stopped the reader. A failed reader stays failed: its stacks may be
+    /// half-updated, so carrying on would give wrong events or worse.
+    failure: ?Error = null,
 
     pub fn init(gpa: Allocator, src: *Io.Reader, options: Options, diag: ?*Diagnostic) Reader {
         return .{ .gpa = gpa, .src = src, .options = options, .diag = diag };
@@ -324,8 +327,13 @@ pub const Reader = struct {
 
     // ------------------------------------------------------------ events
 
+    /// The next event. After an error, every further call returns that same error.
     pub fn next(self: *Reader) Error!Event {
-        const ev = try self.nextEvent();
+        if (self.failure) |e| return e;
+        const ev = self.nextEvent() catch |e| {
+            self.failure = e;
+            return e;
+        };
         self.first_token = false;
         return ev;
     }
