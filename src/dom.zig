@@ -173,6 +173,11 @@ pub const Document = struct {
         defer before.deinit(gpa);
         var after: std.ArrayList(Misc) = .empty;
         defer after.deinit(gpa);
+        // The text run being collected for the innermost element. Runs the reader reports in pieces
+        // (a dropped comment between them) are copied into the arena once, when the run ends:
+        // joining them there would keep every intermediate copy alive.
+        var run: std.ArrayList(u8) = .empty;
+        defer run.deinit(gpa);
 
         while (true) {
             switch (try rd.next()) {
@@ -182,6 +187,7 @@ pub const Document = struct {
                 },
                 .doctype => |t| if (options.keep_comments) try before.append(gpa, .{ .doctype = try a.dupe(u8, t) }),
                 .start_element => |s| {
+                    if (stack.items.len > 0) try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
                     const el = try a.create(Element);
                     const attrs = try a.alloc(Attribute, s.attributes.len);
                     for (s.attributes, attrs) |src_attr, *dst| dst.* = .{ .name = try dupName(a, src_attr.name), .value = try a.dupe(u8, src_attr.value) };
@@ -189,6 +195,7 @@ pub const Document = struct {
                     try stack.append(gpa, .{ .el = el, .kids = .empty });
                 },
                 .end_element => {
+                    try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
                     var f = stack.pop().?;
                     defer f.kids.deinit(gpa);
                     f.el.children = try a.dupe(Node, f.kids.items);
@@ -201,20 +208,23 @@ pub const Document = struct {
                 .text => |t| {
                     if (stack.items.len == 0) continue;
                     if (options.trim_blank_text and std.mem.trim(u8, t, " \t\n\r").len == 0) continue;
-                    try addText(a, gpa, &stack.items[stack.items.len - 1].kids, t);
+                    try run.appendSlice(gpa, t);
                 },
                 .cdata => |t| {
                     if (stack.items.len == 0) continue;
+                    try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
                     try stack.items[stack.items.len - 1].kids.append(gpa, .{ .cdata = try a.dupe(u8, t) });
                 },
                 .comment => |t| if (options.keep_comments) {
                     if (stack.items.len > 0) {
+                        try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
                         try stack.items[stack.items.len - 1].kids.append(gpa, .{ .comment = try a.dupe(u8, t) });
                     } else try (if (root == null) &before else &after).append(gpa, .{ .comment = try a.dupe(u8, t) });
                 },
                 .processing_instruction => |p| if (options.keep_comments) {
                     const pi: PiData = .{ .target = try a.dupe(u8, p.target), .data = try a.dupe(u8, p.data) };
                     if (stack.items.len > 0) {
+                        try endRun(a, gpa, &run, &stack.items[stack.items.len - 1].kids, options);
                         try stack.items[stack.items.len - 1].kids.append(gpa, .{ .processing_instruction = pi });
                     } else try (if (root == null) &before else &after).append(gpa, .{ .processing_instruction = pi });
                 },
@@ -293,17 +303,12 @@ fn dupName(a: Allocator, n: Name) Allocator.Error!Name {
     };
 }
 
-/// Adds text to `kids`, merging with a text node right before it.
-fn addText(a: Allocator, gpa: Allocator, kids: *std.ArrayList(Node), t: []const u8) Allocator.Error!void {
-    if (kids.items.len > 0) if (kids.items[kids.items.len - 1] == .text) {
-        const prev = kids.items[kids.items.len - 1].text;
-        const joined = try a.alloc(u8, prev.len + t.len);
-        @memcpy(joined[0..prev.len], prev);
-        @memcpy(joined[prev.len..], t);
-        kids.items[kids.items.len - 1] = .{ .text = joined };
-        return;
-    };
-    try kids.append(gpa, .{ .text = try a.dupe(u8, t) });
+/// Ends the text run, if there is one, as a single node of `kids`.
+fn endRun(a: Allocator, gpa: Allocator, run: *std.ArrayList(u8), kids: *std.ArrayList(Node), options: Options) Allocator.Error!void {
+    _ = options;
+    if (run.items.len == 0) return;
+    try kids.append(gpa, .{ .text = try a.dupe(u8, run.items) });
+    run.clearRetainingCapacity();
 }
 
 const testing = std.testing;
@@ -358,6 +363,21 @@ fn roundTrip(src: []const u8, options: Document.WriteOptions) ![]u8 {
     errdefer aw.deinit();
     try doc.write(testing.allocator, &aw.writer, options);
     return aw.toOwnedSlice();
+}
+
+test "text split by dropped comments is one node, in memory proportional to the input" {
+    const pieces = 20_000;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "<a>");
+    for (0..pieces) |_| try src.appendSlice(testing.allocator, "x<!----><?p?>");
+    try src.appendSlice(testing.allocator, "</a>");
+    var doc = try Document.parse(testing.allocator, src.items, .{ .keep_comments = false }, null);
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 1), doc.root.children.len);
+    try testing.expectEqual(@as(usize, pieces), doc.root.children[0].text.len);
+    // Joining in the arena used hundreds of megabytes here.
+    try testing.expect(doc.arena.queryCapacity() < 4 * src.items.len);
 }
 
 test "write keeps comments, processing instructions, CDATA, DOCTYPE and the declaration" {
