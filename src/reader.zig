@@ -720,19 +720,24 @@ pub const Reader = struct {
         var bracket_depth: u32 = 0;
         var quote: u8 = 0;
         var skipping: enum { no, comment, pi } = .no;
+        // Where the comment or PI body starts: its terminator cannot overlap the opener, or
+        // `<!-->` would count as a whole comment.
+        var body: usize = 0;
         while (true) {
             const b = try self.mustTake();
             const so_far = self.buf.items;
             if (skipping == .comment) {
-                if (b == '>' and std.mem.endsWith(u8, so_far, "--")) skipping = .no;
+                if (b == '>' and std.mem.endsWith(u8, so_far[body..], "--")) skipping = .no;
             } else if (skipping == .pi) {
-                if (b == '>' and std.mem.endsWith(u8, so_far, "?")) skipping = .no;
+                if (b == '>' and std.mem.endsWith(u8, so_far[body..], "?")) skipping = .no;
             } else if (quote != 0) {
                 if (b == quote) quote = 0;
             } else if (bracket_depth > 0 and b == '-' and std.mem.endsWith(u8, so_far, "<!-")) {
                 skipping = .comment;
+                body = so_far.len + 1;
             } else if (bracket_depth > 0 and b == '?' and std.mem.endsWith(u8, so_far, "<")) {
                 skipping = .pi;
+                body = so_far.len + 1;
             } else switch (b) {
                 '"', '\'' => quote = b,
                 '[' => bracket_depth += 1,

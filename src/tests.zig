@@ -56,6 +56,12 @@ const valid = [_][]const u8{
     "<a:_1 xmlns:a='u'/>",
     "<a:\xC3\xA9 xmlns:a='u'/>",
     "<?xml version='1.0' encoding='US-ASCII'?><a b='&#233;'>&#xE9;</a>",
+    "<!DOCTYPE a [ <!--> it's fine --> ]><a/>",
+    "<!DOCTYPE a [ <!---> \" ] > --> ]><a/>",
+    "<!DOCTYPE a [ <!----> ]><a/>",
+    // A processing instruction may hold what would otherwise end the subset or open a string.
+    "<!DOCTYPE a [ <?pi ] > \" ' ?> ]><a/>",
+    "<!DOCTYPE a [ <?p?> <!ENTITY e '] >'> ]><a/>",
 };
 
 const not_well_formed = [_]struct { src: []const u8, err: xml.Error }{
