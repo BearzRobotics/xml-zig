@@ -13,7 +13,9 @@ pub const Error = error{
     InvalidCharacter,
     /// `end` with nothing open, an attribute outside a start tag, or the like.
     InvalidState,
-    /// A comment containing `--`, or a CDATA section containing `]]>`.
+    /// Content that cannot be written so that it reads back: `--` in a comment, `]]>` in CDATA,
+    /// `?>` in a processing instruction (or whitespace at the start of its data), a carriage
+    /// return where it cannot be escaped, or a malformed DOCTYPE.
     InvalidContent,
     /// The same attribute twice in one start tag.
     DuplicateAttribute,
@@ -45,6 +47,11 @@ pub const Writer = struct {
     wrote_doctype: bool = false,
     /// Anything at all has been written: too late for an XML declaration.
     wrote_any: bool = false,
+
+    /// A reader turns a literal CR into a line feed, and these places have no way to escape it.
+    fn hasCr(s: []const u8) bool {
+        return std.mem.indexOfScalar(u8, s, '\r') != null;
+    }
 
     pub fn init(gpa: Allocator, out: *Io.Writer, options: Options) Writer {
         return .{ .gpa = gpa, .out = out, .options = options };
@@ -94,6 +101,9 @@ pub const Writer = struct {
         if (!chars.isName(target) or std.ascii.eqlIgnoreCase(target, "xml")) return error.InvalidName;
         if (!chars.validText(data)) return error.InvalidCharacter;
         if (std.mem.indexOf(u8, data, "?>") != null) return error.InvalidContent;
+        // Leading whitespace would be read as the separator after the target.
+        if (data.len > 0 and chars.isSpace(data[0])) return error.InvalidContent;
+        if (hasCr(data)) return error.InvalidContent;
         try self.closeTag();
         try self.indentMarkup();
         self.wrote_any = true;
@@ -116,6 +126,7 @@ pub const Writer = struct {
     pub fn doctype(self: *Writer, raw: []const u8) Error!void {
         if (self.wrote_root or self.wrote_doctype) return error.InvalidState;
         if (!chars.validText(raw)) return error.InvalidCharacter;
+        if (hasCr(raw)) return error.InvalidContent;
         self.wrote_doctype = true;
         self.wrote_any = true;
         self.out.writeAll("<!DOCTYPE ") catch |e| return werr(e);
@@ -220,7 +231,7 @@ pub const Writer = struct {
     pub fn cdata(self: *Writer, s: []const u8) Error!void {
         if (self.lens.items.len == 0) return error.InvalidState;
         if (!chars.validText(s)) return error.InvalidCharacter;
-        if (std.mem.indexOf(u8, s, "]]>") != null) return error.InvalidContent;
+        if (std.mem.indexOf(u8, s, "]]>") != null or hasCr(s)) return error.InvalidContent;
         try self.closeTag();
         self.only_elements.items[self.only_elements.items.len - 1] = false;
         self.out.writeAll("<![CDATA[") catch |e| return werr(e);
@@ -230,7 +241,7 @@ pub const Writer = struct {
 
     pub fn comment(self: *Writer, s: []const u8) Error!void {
         if (!chars.validText(s)) return error.InvalidCharacter;
-        if (std.mem.indexOf(u8, s, "--") != null or std.mem.endsWith(u8, s, "-")) return error.InvalidContent;
+        if (std.mem.indexOf(u8, s, "--") != null or std.mem.endsWith(u8, s, "-") or hasCr(s)) return error.InvalidContent;
         try self.closeTag();
         try self.indentMarkup();
         self.wrote_any = true;
@@ -345,6 +356,34 @@ fn writeNested(gpa: Allocator) !void {
         while (try rd.next() != .end_of_document) {}
     }
     if (failed) |e| return e;
+}
+
+test "content that would not read back is refused" {
+    var aw: Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var w = Writer.init(testing.allocator, &aw.writer, .{});
+    defer w.deinit();
+    try testing.expectError(error.InvalidContent, w.doctype("a [\r\n]"));
+    try w.start("a");
+    const before = aw.written().len;
+    for ([_][]const u8{ "a--b", "a-", "-", "a\rb" }) |s| try testing.expectError(error.InvalidContent, w.comment(s));
+    for ([_][]const u8{ "x]]>y", "a\rb" }) |s| try testing.expectError(error.InvalidContent, w.cdata(s));
+    for ([_][]const u8{ "a?>b", " x", "\tx", "\nx", "a\rb" }) |s| try testing.expectError(error.InvalidContent, w.processingInstruction("t", s));
+    for ([_][]const u8{ "xml", "XmL", "1t", "a b", "" }) |t| try testing.expectError(error.InvalidName, w.processingInstruction(t, ""));
+    for ([_][]const u8{ "\x00", "\x0B", "\xFF", "\xEF\xBF\xBF", "\xED\xA0\x80" }) |s| {
+        try testing.expectError(error.InvalidCharacter, w.text(s));
+        try testing.expectError(error.InvalidCharacter, w.cdata(s));
+        try testing.expectError(error.InvalidCharacter, w.comment(s));
+        try testing.expectError(error.InvalidCharacter, w.processingInstruction("t", s));
+        try testing.expectError(error.InvalidCharacter, w.attribute("k", s));
+    }
+    // Nothing refused left a trace.
+    try testing.expectEqual(before, aw.written().len);
+    // A carriage return can be escaped in text and attribute values, and is.
+    try w.attribute("k", "a\r\n\tb");
+    try w.text("c\r\nd");
+    try w.finish();
+    try testing.expectEqualStrings("<a k=\"a&#13;&#10;&#9;b\">c&#13;\nd</a>", aw.written());
 }
 
 test "the prolog cannot be written out of order" {
